@@ -1,0 +1,54 @@
+---
+- name: Reset RKE2 and Cleanup
+  hosts: all
+  become: true
+  tasks:
+    - name: Check for RKE2 uninstall script
+      stat:
+        path: /usr/local/bin/rke2-uninstall.sh
+      register: rke2_uninstall_script
+
+    - name: Run RKE2 uninstall script
+      command: /usr/local/bin/rke2-uninstall.sh
+      when: rke2_uninstall_script.stat.exists
+      ignore_errors: true
+
+    - name: Check for RKE2 agent uninstall script
+      stat:
+        path: /usr/local/bin/rke2-agent-uninstall.sh
+      register: rke2_agent_uninstall_script
+
+    - name: Run RKE2 agent uninstall script
+      command: /usr/local/bin/rke2-agent-uninstall.sh
+      when: rke2_agent_uninstall_script.stat.exists
+      ignore_errors: true
+
+    - name: Cleanup Rancher directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/rancher
+        - /var/lib/rancher
+        - /var/lib/kubelet
+        - /etc/cni
+        - /opt/cni
+        - /var/lib/cni
+        - /run/k3s
+        - /run/rke2
+        - /var/lib/calico
+
+    - name: Kill any remaining RKE2/K8s processes
+      shell: |
+        ps aux | grep -E 'rke2|kubelet|containerd' | grep -v grep | awk '{print $2}' | xargs -r kill -9
+      ignore_errors: true
+
+- name: Cleanup Local Artifacts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Remove shared directory
+      file:
+        path: /tmp/rancher_shared
+        state: absent

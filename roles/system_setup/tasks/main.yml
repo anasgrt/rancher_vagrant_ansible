@@ -1,0 +1,98 @@
+---
+- name: Set hostname
+  hostname:
+    name: "{{ node_name }}"
+
+- name: Update /etc/hosts with hostname
+  lineinfile:
+    path: /etc/hosts
+    regexp: '^127\.0\.1\.1'
+    line: "127.0.1.1 {{ node_name }}"
+
+- name: Add Rancher hostname to /etc/hosts
+  blockinfile:
+    path: /etc/hosts
+    block: |
+      # Rancher Multi-Cluster Service Discovery
+      {{ base_ip }}.{{ management_ip_num }} {{ rancher_hostname }} rancher-server.local rancher.local rancher.local.test
+      {{ base_ip }}.{{ management_ip_num }} {{ base_ip }}.{{ management_ip_num }}.nip.io
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - Rancher"
+
+- name: Stop and disable systemd-resolved
+  systemd:
+    name: systemd-resolved
+    state: stopped
+    enabled: false
+  ignore_errors: true
+
+- name: Configure DNS resolution
+  copy:
+    dest: /etc/resolv.conf
+    content: |
+      nameserver 8.8.8.8
+      nameserver 1.1.1.1
+      nameserver 9.9.9.9
+      options timeout:2 attempts:3 rotate
+      search local
+    mode: '0644'
+
+- name: Make resolv.conf immutable
+  file:
+    path: /etc/resolv.conf
+    attributes: +i
+  ignore_errors: true
+
+- name: Update apt cache (force refresh)
+  apt:
+    update_cache: true
+    cache_valid_time: 0
+  retries: 3
+  delay: 10
+  register: apt_update
+  until: apt_update is succeeded
+
+- name: Install essential packages
+  apt:
+    name:
+      - curl
+      - ca-certificates
+      - jq
+      - bash
+      - apt-transport-https
+      - dnsutils
+      - net-tools
+      - htop
+      - gnupg
+      - software-properties-common
+      - python3-pip
+      - python3-kubernetes
+    state: present
+    allow_downgrade: true
+  retries: 3
+  delay: 10
+  register: apt_install
+  until: apt_install is succeeded
+
+- name: Install yq
+  get_url:
+    url: "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64"
+    dest: /usr/local/bin/yq
+    mode: '0755'
+  register: yq_download
+  until: yq_download is succeeded
+  retries: 5
+  delay: 10
+
+- name: Stop and disable UFW firewall
+  systemd:
+    name: ufw
+    state: stopped
+    enabled: false
+  ignore_errors: true
+
+- name: Configure colored bash prompt for root
+  blockinfile:
+    path: /root/.bashrc
+    block: |
+      export PS1="\[\033[01;31m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\\$ "
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - Prompt"

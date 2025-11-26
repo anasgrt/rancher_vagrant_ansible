@@ -1,0 +1,26 @@
+---
+- name: Wait for cattle-node-agent daemonset (if exists)
+  kubernetes.core.k8s_info:
+    kind: DaemonSet
+    name: cattle-node-agent
+    namespace: cattle-system
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  register: cattle_ds_check
+  failed_when: false
+
+- name: Wait for cattle-node-agent rollout
+  kubernetes.core.k8s_info:
+    kind: DaemonSet
+    name: cattle-node-agent
+    namespace: cattle-system
+    kubeconfig: "{{ rke2_kubeconfig }}"
+    wait: true
+    wait_timeout: 300
+  when: cattle_ds_check.resources is defined and cattle_ds_check.resources | length > 0
+  failed_when: false
+
+- name: Configure kubeseal alias
+  lineinfile:
+    path: /home/vagrant/.bashrc
+    line: 'alias kubeseal="kubeseal --controller-namespace=kube-system --controller-name=sealed-secrets-controller"'
+    create: true

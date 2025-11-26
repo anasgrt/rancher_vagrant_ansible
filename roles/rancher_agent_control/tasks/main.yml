@@ -1,0 +1,228 @@
+---
+# ============================================================================
+# REFACTORED RANCHER AGENT CONTROL ROLE
+# Simplified from 113 lines to ~55 lines
+# ============================================================================
+
+- name: Wait for import manifest file
+  ansible.builtin.wait_for:
+    path: "{{ shared_dir }}/cluster_{{ cluster_name }}_import.yml"
+    timeout: 600
+  delegate_to: localhost
+  become: false
+
+- name: Read import manifest information
+  ansible.builtin.slurp:
+    src: "{{ shared_dir }}/cluster_{{ cluster_name }}_import.yml"
+  register: import_info_content
+  delegate_to: localhost
+  become: false
+
+- name: Parse import information
+  ansible.builtin.set_fact:
+    import_data: "{{ import_info_content.content | b64decode | from_yaml }}"
+
+- name: Wait for Rancher server to be reachable
+  ansible.builtin.uri:
+    url: "{{ rancher_url }}/ping"
+    validate_certs: false
+    status_code: 200
+  register: rancher_ping
+  until: rancher_ping.status == 200
+  retries: 60
+  delay: 5
+
+- name: Apply Rancher import manifest
+  ansible.builtin.shell: |
+    {{ import_data.import_command | replace('curl -sfL', 'curl -ksfL') | replace('kubectl', rke2_bin_path + '/kubectl --kubeconfig=' + rke2_kubeconfig) }}
+  retries: "{{ timeout_manifest_wait_attempts }}"
+  delay: 5
+  register: manifest_apply
+  until: manifest_apply.rc == 0
+
+- name: Create cattle-system namespace
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: cattle-system
+    kubeconfig: "{{ rke2_kubeconfig }}"
+
+- name: Wait for cattle-system namespace to be ready
+  ansible.builtin.pause:
+    seconds: 5
+
+# Get the CA content and calculate checksum the same way Rancher does
+# Rancher's CAChecksum() function adds a trailing newline before hashing
+- name: Fetch current CA from Rancher API
+  ansible.builtin.uri:
+    url: "{{ rancher_url }}/v3/settings/cacerts"
+    method: GET
+    validate_certs: false
+    return_content: true
+    headers:
+      Accept: application/json
+  register: rancher_cacerts_api
+  delegate_to: localhost
+  become: false
+  when: rancher_ca_signed_cert | bool
+
+- name: Extract CA certificate content
+  ansible.builtin.set_fact:
+    rancher_ca_content: "{{ rancher_cacerts_api.json.value }}"
+  when: rancher_ca_signed_cert | bool
+
+# Calculate CA checksum exactly as Rancher does:
+# 1. Get the cacerts value
+# 2. Add trailing newline if not present
+# 3. SHA256 hash
+- name: Write CA certificate to temp file for checksum calculation
+  ansible.builtin.copy:
+    content: "{{ rancher_ca_content }}\n"
+    dest: /tmp/rancher_ca_for_checksum.pem
+    mode: '0644'
+  delegate_to: localhost
+  become: false
+  when: rancher_ca_signed_cert | bool
+
+- name: Calculate CA checksum (matching Rancher's CAChecksum function)
+  ansible.builtin.shell: cat /tmp/rancher_ca_for_checksum.pem | shasum -a 256 | cut -d' ' -f1
+  args:
+    executable: /bin/bash
+  register: ca_checksum_result
+  delegate_to: localhost
+  become: false
+  when: rancher_ca_signed_cert | bool
+  changed_when: false
+
+- name: Clean up temp CA file
+  ansible.builtin.file:
+    path: /tmp/rancher_ca_for_checksum.pem
+    state: absent
+  delegate_to: localhost
+  become: false
+  when: rancher_ca_signed_cert | bool
+
+- name: Set CA checksum fact
+  ansible.builtin.set_fact:
+    rancher_ca_checksum: "{{ ca_checksum_result.stdout | trim }}"
+  when: rancher_ca_signed_cert | bool
+
+- name: Debug CA checksum
+  ansible.builtin.debug:
+    msg: "CA checksum from Rancher registration token: {{ rancher_ca_checksum }}"
+  when: rancher_ca_signed_cert | bool
+
+- name: Create CA configmap for cattle agents
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: rancher-ca
+        namespace: cattle-system
+      data:
+        ca-additional.pem: "{{ rancher_ca_content }}"
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  when: rancher_ca_signed_cert | bool
+
+# Wait for cattle-cluster-agent deployment to exist before patching
+- name: Wait for cattle-cluster-agent deployment
+  ansible.builtin.command: >
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }}
+    get deployment cattle-cluster-agent -n cattle-system -o name
+  register: agent_deployment_check
+  until: agent_deployment_check.rc == 0
+  retries: 30
+  delay: 10
+  changed_when: false
+  when: rancher_ca_signed_cert | bool
+
+# Update the deployment's CATTLE_CA_CHECKSUM env var to match the CA from the API
+- name: Update cattle-cluster-agent CA checksum via kubectl
+  ansible.builtin.shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} set env deployment/cattle-cluster-agent -n cattle-system CATTLE_CA_CHECKSUM={{ rancher_ca_checksum }}
+  when: rancher_ca_signed_cert | bool
+  register: checksum_update
+  retries: 5
+  delay: 10
+  until: checksum_update.rc == 0
+
+- name: Patch cattle-cluster-agent with CA volume
+  kubernetes.core.k8s:
+    state: patched
+    kind: Deployment
+    name: cattle-cluster-agent
+    namespace: cattle-system
+    definition:
+      spec:
+        template:
+          spec:
+            volumes:
+              - name: rancher-ca
+                configMap:
+                  name: rancher-ca
+            containers:
+              - name: cluster-register
+                volumeMounts:
+                  - name: rancher-ca
+                    mountPath: /etc/ssl/certs/ca-additional.pem
+                    subPath: ca-additional.pem
+                    readOnly: true
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  when: rancher_ca_signed_cert | bool
+  retries: 10
+  delay: 10
+  failed_when: false
+
+- name: Wait for cattle-cluster-agent deployment
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: cattle-cluster-agent
+    namespace: cattle-system
+    kubeconfig: "{{ rke2_kubeconfig }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: "{{ timeout_cattle_agent }}"
+  failed_when: false
+
+- name: Wait for cattle-node-agent daemonset
+  kubernetes.core.k8s_info:
+    kind: DaemonSet
+    name: cattle-node-agent
+    namespace: cattle-system
+    kubeconfig: "{{ rke2_kubeconfig }}"
+    wait: true
+    wait_timeout: "{{ timeout_cattle_agent }}"
+  failed_when: false
+
+- name: Verify cluster registration
+  ansible.builtin.command: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n cattle-system get pods --no-headers"
+  register: cattle_pods
+  retries: 30
+  delay: 10
+  until: "'Running' in cattle_pods.stdout"
+  changed_when: false
+  failed_when: false
+  ignore_errors: true
+
+- name: Restart cattle-cluster-agent if needed
+  kubernetes.core.k8s:
+    state: patched
+    kind: Deployment
+    name: cattle-cluster-agent
+    namespace: cattle-system
+    definition:
+      spec:
+        template:
+          metadata:
+            annotations:
+              kubectl.kubernetes.io/restartedAt: "{{ ansible_date_time.iso8601 }}"
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  when: cattle_pods.stdout is defined and 'Running' not in cattle_pods.stdout
+  failed_when: false

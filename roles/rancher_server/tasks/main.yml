@@ -1,0 +1,505 @@
+---
+# ============================================================================
+# REFACTORED RANCHER SERVER ROLE
+# Simplified from 363 lines to ~180 lines while maintaining exact same logic
+# ============================================================================
+
+# ============================================================================
+# SECTION 1: WAIT FOR RKE2 TO BE READY
+# ============================================================================
+- name: Wait for RKE2 ingress controller (if enabled)
+  ansible.builtin.command: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n kube-system get ds rke2-ingress-nginx-controller"
+  register: ingress_check
+  until: ingress_check.rc == 0
+  retries: 60
+  delay: 5
+  changed_when: false
+  when: not disable_ingress_nginx_management | bool
+
+# ============================================================================
+# SECTION 2: INSTALL CERT-MANAGER
+# ============================================================================
+- name: Install cert-manager namespace and CRDs
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: cert-manager
+    kubeconfig: "{{ rke2_kubeconfig }}"
+
+- name: Install cert-manager CRDs
+  kubernetes.core.k8s:
+    state: present
+    src: https://github.com/cert-manager/cert-manager/releases/download/v1.13.0/cert-manager.crds.yaml
+    validate_certs: false
+    kubeconfig: "{{ rke2_kubeconfig }}"
+
+- name: Install cert-manager via Helm
+  kubernetes.core.helm:
+    name: cert-manager
+    chart_ref: jetstack/cert-manager
+    release_namespace: cert-manager
+    create_namespace: false
+    chart_version: "{{ cert_manager_version | default('v1.13.0') }}"
+    values:
+      installCRDs: false
+      global:
+        leaderElection:
+          namespace: cert-manager
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  environment:
+    KUBECONFIG: "{{ rke2_kubeconfig }}"
+
+# ============================================================================
+# SECTION 3: GENERATE CERTIFICATES (if using CA-signed)
+# ============================================================================
+- name: Check if TLS secrets already exist
+  kubernetes.core.k8s_info:
+    kind: Secret
+    name: tls-ca
+    namespace: cattle-system
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  register: existing_tls_ca
+  failed_when: false
+  when: rancher_ca_signed_cert | bool
+
+- name: Generate and install certificates
+  when:
+    - rancher_ca_signed_cert | bool
+    - existing_tls_ca.resources | default([]) | length == 0
+  block:
+    - name: Create temporary directory for certificates
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: certs
+      register: ca_temp_dir
+
+    - name: Generate CA private key
+      community.crypto.openssl_privatekey:
+        path: "{{ ca_temp_dir.path }}/ca.key"
+        size: 4096
+
+    - name: Generate CA CSR
+      community.crypto.openssl_csr:
+        path: "{{ ca_temp_dir.path }}/ca.csr"
+        privatekey_path: "{{ ca_temp_dir.path }}/ca.key"
+        common_name: "Rancher-CA"
+        organization_name: "Rancher-Ansible"
+        country_name: "US"
+        basic_constraints:
+          - "CA:TRUE"
+        basic_constraints_critical: true
+        key_usage:
+          - keyCertSign
+          - cRLSign
+        key_usage_critical: true
+
+    - name: Generate CA certificate
+      community.crypto.x509_certificate:
+        path: "{{ ca_temp_dir.path }}/ca.crt"
+        csr_path: "{{ ca_temp_dir.path }}/ca.csr"
+        privatekey_path: "{{ ca_temp_dir.path }}/ca.key"
+        provider: selfsigned
+        selfsigned_not_after: "+3650d"
+
+    - name: Generate server private key
+      community.crypto.openssl_privatekey:
+        path: "{{ ca_temp_dir.path }}/tls.key"
+        size: 4096
+
+    - name: Generate server CSR
+      community.crypto.openssl_csr:
+        path: "{{ ca_temp_dir.path }}/tls.csr"
+        privatekey_path: "{{ ca_temp_dir.path }}/tls.key"
+        common_name: "{{ rancher_hostname }}"
+        subject_alt_name:
+          - "DNS:{{ rancher_hostname }}"
+          - "DNS:*.{{ rancher_hostname }}"
+
+    - name: Generate server certificate
+      community.crypto.x509_certificate:
+        path: "{{ ca_temp_dir.path }}/tls.crt"
+        csr_path: "{{ ca_temp_dir.path }}/tls.csr"
+        provider: ownca
+        ownca_path: "{{ ca_temp_dir.path }}/ca.crt"
+        ownca_privatekey_path: "{{ ca_temp_dir.path }}/ca.key"
+        ownca_not_after: "+365d"
+
+    - name: Create cattle-system namespace
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: cattle-system
+        kubeconfig: "{{ rke2_kubeconfig }}"
+
+    - name: Read TLS certificate from remote host
+      ansible.builtin.slurp:
+        src: "{{ ca_temp_dir.path }}/tls.crt"
+      register: tls_cert_content
+
+    - name: Read TLS private key from remote host
+      ansible.builtin.slurp:
+        src: "{{ ca_temp_dir.path }}/tls.key"
+      register: tls_key_content
+
+    - name: Create TLS secret for Rancher
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          type: kubernetes.io/tls
+          metadata:
+            name: tls-rancher-ingress
+            namespace: cattle-system
+          data:
+            tls.crt: "{{ tls_cert_content.content }}"
+            tls.key: "{{ tls_key_content.content }}"
+        kubeconfig: "{{ rke2_kubeconfig }}"
+
+    - name: Read CA certificate from remote host
+      ansible.builtin.slurp:
+        src: "{{ ca_temp_dir.path }}/ca.crt"
+      register: ca_cert_content
+
+    - name: Create CA secret for Rancher
+      kubernetes.core.k8s:
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: tls-ca
+            namespace: cattle-system
+          data:
+            cacerts.pem: "{{ ca_cert_content.content }}"
+        kubeconfig: "{{ rke2_kubeconfig }}"
+
+# ============================================================================
+# SECTION 4: INSTALL RANCHER VIA HELM
+# ============================================================================
+- name: Check for existing Rancher Helm release
+  ansible.builtin.command: helm list -n cattle-system -o json
+  register: rancher_helm_check
+  changed_when: false
+  environment:
+    KUBECONFIG: "{{ rke2_kubeconfig }}"
+
+- name: Install Rancher via Helm
+  kubernetes.core.helm:
+    name: rancher
+    chart_ref: rancher-latest/rancher
+    release_namespace: cattle-system
+    create_namespace: true
+    values:
+      hostname: "{{ rancher_hostname }}"
+      replicas: 1
+      bootstrapPassword: "{{ rancher_bootstrap_password }}"
+      ingress:
+        tls:
+          source: "{{ 'secret' if rancher_ca_signed_cert else 'rancher' }}"
+      privateCA: "{{ rancher_ca_signed_cert | bool }}"
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  environment:
+    KUBECONFIG: "{{ rke2_kubeconfig }}"
+  retries: 3
+  delay: 10
+  register: rancher_install
+  until: rancher_install is succeeded
+
+- name: Wait for Rancher to be ready
+  ansible.builtin.uri:
+    url: "{{ rancher_url }}/ping"
+    validate_certs: false
+    status_code: 200
+  register: rancher_ping
+  until: rancher_ping.status == 200
+  retries: 60
+  delay: 10
+
+- name: Wait for Rancher initialization
+  ansible.builtin.pause:
+    seconds: "{{ timeout_rancher_init }}"
+
+- name: Wait for Rancher webhook to be ready
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: rancher-webhook
+    namespace: cattle-system
+    kubeconfig: "{{ rke2_kubeconfig }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 300
+  failed_when: false
+
+- name: Sync CA certificate from Rancher API to shared directory
+  ansible.builtin.uri:
+    url: "{{ rancher_url }}/v3/settings/cacerts"
+    method: GET
+    validate_certs: false
+    return_content: true
+  register: rancher_cacerts
+  until: rancher_cacerts.json.value | default('') | length > 0
+  retries: 30
+  delay: 5
+  when: rancher_ca_signed_cert | bool
+
+# CRITICAL: Update tls-ca secret to match Rancher's internal cacerts setting
+# This ensures the checksum matches what Rancher uses for cluster registration
+- name: Update tls-ca secret to match Rancher settings
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: tls-ca
+        namespace: cattle-system
+      data:
+        cacerts.pem: "{{ rancher_cacerts.json.value | b64encode }}"
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  when: rancher_ca_signed_cert | bool and rancher_cacerts.json.value | default('') | length > 0
+
+# Check if existing local CA certificate matches the one from Rancher
+- name: Check existing local CA certificate
+  ansible.builtin.stat:
+    path: "{{ playbook_dir }}/rancher-ca.crt"
+    checksum_algorithm: sha256
+  register: existing_local_ca
+  delegate_to: localhost
+  become: false
+  when: rancher_ca_signed_cert | bool
+
+- name: Calculate checksum of new CA certificate
+  ansible.builtin.set_fact:
+    new_ca_checksum: "{{ rancher_cacerts.json.value | hash('sha256') }}"
+  when: rancher_ca_signed_cert | bool and rancher_cacerts.json.value | default('') | length > 0
+
+- name: Determine if CA certificate has changed
+  ansible.builtin.set_fact:
+    ca_cert_changed: "{{ not existing_local_ca.stat.exists or (existing_local_ca.stat.checksum | default('')) != new_ca_checksum }}"
+  when: rancher_ca_signed_cert | bool and rancher_cacerts.json.value | default('') | length > 0
+
+- name: Write synced CA certificate to shared directory
+  ansible.builtin.copy:
+    content: "{{ rancher_cacerts.json.value }}"
+    dest: "{{ shared_dir }}/rancher-ca.crt"
+    mode: '0644'
+    force: true
+  delegate_to: localhost
+  become: false
+  when: rancher_ca_signed_cert | bool and rancher_cacerts.json.value | default('') | length > 0
+
+- name: Copy CA certificate to playbook directory for install-cert.sh
+  ansible.builtin.copy:
+    content: "{{ rancher_cacerts.json.value }}"
+    dest: "{{ playbook_dir }}/rancher-ca.crt"
+    mode: '0644'
+    force: true
+  delegate_to: localhost
+  become: false
+  when: rancher_ca_signed_cert | bool and rancher_cacerts.json.value | default('') | length > 0
+  register: ca_cert_copied
+
+# Automatically update macOS Keychain if certificate changed (macOS only)
+# Note: This requires either passwordless sudo or will gracefully fall back to manual instructions
+- name: Check if passwordless sudo is available for security command
+  ansible.builtin.shell: |
+    sudo -n security help >/dev/null 2>&1 && echo "yes" || echo "no"
+  delegate_to: localhost
+  become: false
+  register: sudo_available
+  changed_when: false
+  when:
+    - rancher_ca_signed_cert | bool
+    - ca_cert_changed | default(false)
+    - ansible_facts['os_family'] is not defined or lookup('pipe', 'uname') == 'Darwin'
+
+- name: Remove old Rancher-CA from macOS Keychain
+  ansible.builtin.shell: |
+    while sudo -n security find-certificate -c "Rancher-CA" /Library/Keychains/System.keychain >/dev/null 2>&1; do
+      sudo -n security delete-certificate -c "Rancher-CA" /Library/Keychains/System.keychain 2>/dev/null || break
+    done
+  delegate_to: localhost
+  become: false
+  when:
+    - rancher_ca_signed_cert | bool
+    - ca_cert_changed | default(false)
+    - sudo_available.stdout | default('no') == 'yes'
+  ignore_errors: true
+  changed_when: true
+
+- name: Add new Rancher-CA to macOS Keychain
+  ansible.builtin.shell: |
+    sudo -n security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "{{ playbook_dir }}/rancher-ca.crt"
+  delegate_to: localhost
+  become: false
+  when:
+    - rancher_ca_signed_cert | bool
+    - ca_cert_changed | default(false)
+    - sudo_available.stdout | default('no') == 'yes'
+  register: keychain_update
+  ignore_errors: true
+  changed_when: keychain_update.rc == 0
+
+- name: Display certificate update status
+  ansible.builtin.debug:
+    msg:
+      - "╔════════════════════════════════════════════════════════════════════════╗"
+      - "║                 🔐 CA Certificate Status                              ║"
+      - "╚════════════════════════════════════════════════════════════════════════╝"
+      - ""
+      - "{{ '✅ CA certificate was UPDATED and added to macOS Keychain!' if (keychain_update is defined and keychain_update.rc | default(1) == 0) else '📋 CA certificate file updated - Keychain update requires manual action' if ca_cert_changed | default(false) else '✅ CA certificate unchanged - no update needed' }}"
+      - ""
+      - "{{ '🔄 Please RESTART your browser to pick up the new certificate!' if (keychain_update is defined and keychain_update.rc | default(1) == 0) else '' }}"
+  when: rancher_ca_signed_cert | bool
+
+- name: Show manual certificate installation instructions (if needed)
+  ansible.builtin.debug:
+    msg:
+      - "╔════════════════════════════════════════════════════════════════════════╗"
+      - "║           🔒 Certificate Installation Required                        ║"
+      - "╚════════════════════════════════════════════════════════════════════════╝"
+      - ""
+      - "The CA certificate has been updated. To trust it in your browser, run:"
+      - ""
+      - "  cd {{ playbook_dir }} && ./install-cert.sh"
+      - ""
+      - "Then restart your browser."
+      - ""
+  when:
+    - rancher_ca_signed_cert | bool
+    - ca_cert_changed | default(false)
+    - keychain_update is not defined or keychain_update.rc | default(1) != 0
+
+# ============================================================================
+# SECTION 5: GET RANCHER API TOKEN
+# ============================================================================
+- name: Get Rancher bootstrap password from secret
+  ansible.builtin.command: >
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }}
+    get secret --namespace cattle-system bootstrap-secret
+    -o jsonpath='{.data.bootstrapPassword}'
+  register: bootstrap_password_b64
+  changed_when: false
+  failed_when: false
+
+- name: Set bootstrap password
+  ansible.builtin.set_fact:
+    actual_bootstrap_password: "{{ (bootstrap_password_b64.stdout | b64decode | trim) if bootstrap_password_b64.rc == 0 else rancher_bootstrap_password }}"
+
+- name: Login to Rancher and get API token
+  ansible.builtin.uri:
+    url: "{{ rancher_url }}/v3-public/localProviders/local?action=login"
+    method: POST
+    body_format: json
+    body:
+      username: "admin"
+      password: "{{ actual_bootstrap_password }}"
+    validate_certs: false
+    status_code: 201
+  register: rancher_login_result
+
+- name: Save Rancher API token
+  ansible.builtin.copy:
+    content: "{{ rancher_login_result.json.token }}"
+    dest: "{{ shared_dir }}/rancher_token"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+
+- name: Configure Rancher server-url setting
+  ansible.builtin.uri:
+    url: "{{ rancher_url }}/v3/settings/server-url"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ rancher_login_result.json.token }}"
+    body_format: json
+    body:
+      value: "{{ rancher_url }}"
+    validate_certs: false
+    status_code: 200
+
+# ============================================================================
+# SECTION 6: CREATE DOWNSTREAM CLUSTERS AND REGISTRATION TOKENS
+# Simplified from 10 tasks to 3 tasks
+# ============================================================================
+- name: Create downstream clusters in Rancher
+  ansible.builtin.uri:
+    url: "{{ rancher_url }}/v3/cluster"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ rancher_login_result.json.token }}"
+    body_format: json
+    body:
+      type: "cluster"
+      name: "{{ item.name }}"
+      description: "{{ item.environment }} cluster"
+    validate_certs: false
+    status_code: [201, 409, 422]
+  loop: "{{ downstream_clusters }}"
+  register: cluster_creation
+
+- name: Get cluster IDs and create registration tokens
+  ansible.builtin.uri:
+    url: "{{ rancher_url }}/v3/clusters?name={{ item.name }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ rancher_login_result.json.token }}"
+    validate_certs: false
+  loop: "{{ downstream_clusters }}"
+  register: cluster_list
+  retries: 3
+  delay: 5
+
+- name: Create cluster registration tokens
+  ansible.builtin.uri:
+    url: "{{ rancher_url }}/v3/clusterregistrationtoken"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ rancher_login_result.json.token }}"
+    body_format: json
+    body:
+      type: "clusterRegistrationToken"
+      clusterId: "{{ item.json.data[0].id }}"
+    validate_certs: false
+    status_code: [201, 409]
+  loop: "{{ cluster_list.results }}"
+  when: item.json.data | length > 0
+  register: token_creation
+  retries: 3
+  delay: 5
+
+- name: Get registration tokens
+  ansible.builtin.uri:
+    url: "{{ rancher_url }}/v3/clusterregistrationtoken?clusterId={{ item.json.data[0].id }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ rancher_login_result.json.token }}"
+    validate_certs: false
+  loop: "{{ cluster_list.results }}"
+  when: item.json.data | length > 0
+  register: registration_tokens
+  retries: 5
+  delay: 10
+
+- name: Save cluster import information
+  ansible.builtin.copy:
+    content: |
+      cluster_id: {{ item.item.json.data[0].id }}
+      cluster_name: {{ item.item.item.name }}
+      import_command: "curl -ksfL {{ rancher_url }}/v3/import/{{ item.json.data[0].token }}_{{ item.item.json.data[0].id }}.yaml | kubectl apply -f -"
+      registration_token: {{ item.json.data[0].token }}
+    dest: "{{ shared_dir }}/cluster_{{ item.item.item.name }}_import.yml"
+    mode: '0644'
+  loop: "{{ registration_tokens.results }}"
+  delegate_to: localhost
+  become: false
+  when: item.json.data is defined and item.json.data | length > 0

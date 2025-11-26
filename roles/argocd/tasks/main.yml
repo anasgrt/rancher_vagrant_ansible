@@ -1,0 +1,35 @@
+---
+- name: Create argocd namespace
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} create namespace argocd --dry-run=client -o yaml | {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f -"
+
+- name: Install ArgoCD
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+  environment:
+    KUBECONFIG: "{{ rke2_kubeconfig }}"
+
+- name: Wait for ArgoCD server deployment
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n argocd rollout status deployment/argocd-server --timeout=300s"
+
+- name: Get ArgoCD initial admin password
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+  register: argocd_password
+  ignore_errors: true
+
+- name: Save ArgoCD password
+  copy:
+    content: "{{ argocd_password.stdout }}"
+    dest: "{{ shared_dir }}/argocd_password"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+  when: argocd_password.rc == 0
+
+- name: Display ArgoCD access information
+  debug:
+    msg:
+      - "ArgoCD installed successfully"
+      - "Username: admin"
+      - "Password: {{ argocd_password.stdout }}"
+      - "Access via: kubectl port-forward -n argocd svc/argocd-server 8080:443"
+  when: argocd_password.rc == 0

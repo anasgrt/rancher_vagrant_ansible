@@ -1,0 +1,237 @@
+---
+# ============================================================================
+# REFACTORED RKE2 DOWNSTREAM CONTROL ROLE
+# Uses rke2_common role to eliminate duplication
+# ============================================================================
+
+- name: Include common RKE2 installation tasks
+  ansible.builtin.include_role:
+    name: rke2_common
+  vars:
+    rke2_type: server
+
+- name: Get disable_ingress_nginx setting for this cluster
+  ansible.builtin.set_fact:
+    cluster_disable_ingress: "{{ (downstream_clusters | selectattr('name', 'equalto', cluster_name) | first).disable_ingress_nginx | default(false) }}"
+
+- name: Configure RKE2 control plane
+  ansible.builtin.copy:
+    dest: "{{ rke2_config_dir }}/config.yaml"
+    content: |
+      node-ip: {{ node_ip }}
+      node-name: {{ node_name }}
+      cni: {{ cni }}
+      write-kubeconfig-mode: 0644
+      tls-san:
+      - {{ node_ip }}
+      - localhost
+      - 127.0.0.1
+      {% if cluster_disable_ingress | bool %}
+      disable:
+        - rke2-ingress-nginx
+      {% endif %}
+    mode: '0644'
+
+- name: Create RKE2 manifests directory
+  ansible.builtin.file:
+    path: "{{ rke2_data_dir }}/server/manifests"
+    state: directory
+    mode: '0755'
+
+- name: Configure Calico to use correct interface
+  ansible.builtin.copy:
+    dest: "{{ rke2_data_dir }}/server/manifests/rke2-calico-config.yaml"
+    content: |
+      apiVersion: helm.cattle.io/v1
+      kind: HelmChartConfig
+      metadata:
+        name: rke2-calico
+        namespace: kube-system
+      spec:
+        valuesContent: |-
+          installation:
+            calicoNetwork:
+              nodeAddressAutodetectionV4:
+                interface: "eth1"
+    mode: '0644'
+  when: cni == "calico"
+
+- name: Configure Canal/Flannel to use correct interface
+  ansible.builtin.copy:
+    dest: "{{ rke2_data_dir }}/server/manifests/rke2-canal-config.yaml"
+    content: |
+      apiVersion: helm.cattle.io/v1
+      kind: HelmChartConfig
+      metadata:
+        name: rke2-canal
+        namespace: kube-system
+      spec:
+        valuesContent: |-
+          flannel:
+            iface: "eth1"
+    mode: '0644'
+  when: cni == "canal"
+
+- name: Enable and start RKE2 server service
+  ansible.builtin.systemd:
+    name: rke2-server
+    enabled: true
+    state: started
+
+- name: Wait for RKE2 server to be ready
+  ansible.builtin.wait_for:
+    path: "{{ rke2_kubeconfig }}"
+    timeout: 300
+
+- name: Fix kubeconfig permissions
+  ansible.builtin.file:
+    path: "{{ rke2_kubeconfig }}"
+    mode: '0644'
+
+- name: Include post-installation tasks (kubectl, helm, environment)
+  ansible.builtin.include_role:
+    name: rke2_post_install
+
+- name: Wait for Kubernetes API to be ready
+  ansible.builtin.command: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get nodes"
+  register: kubectl_result
+  until: kubectl_result.rc == 0
+  retries: 60
+  delay: 5
+  changed_when: false
+
+- name: Wait for node to be ready
+  ansible.builtin.command: >
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }}
+    wait --for=condition=Ready node/{{ node_name }} --timeout=300s
+  changed_when: false
+  failed_when: false
+
+- name: Configure CoreDNS with Rancher hostname
+  kubernetes.core.k8s:
+    state: present
+    kind: ConfigMap
+    name: rke2-coredns-rke2-coredns
+    namespace: kube-system
+    definition:
+      data:
+        Corefile: |
+          .:53 {
+              errors
+              health {
+                  lameduck 10s
+              }
+              ready
+              hosts {
+                  {{ base_ip }}.{{ management_ip_num }} {{ rancher_hostname }}
+                  fallthrough
+              }
+              kubernetes cluster.local cluster.local in-addr.arpa ip6.arpa {
+                  pods insecure
+                  fallthrough in-addr.arpa ip6.arpa
+                  ttl 30
+              }
+              prometheus 0.0.0.0:9153
+              forward . 8.8.8.8 1.1.1.1
+              cache 30
+              loop
+              reload
+              loadbalance
+          }
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  failed_when: false
+
+- name: Restart CoreDNS pods
+  kubernetes.core.k8s:
+    state: absent
+    kind: Pod
+    namespace: kube-system
+    label_selectors:
+      - k8s-app=kube-dns
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  failed_when: false
+
+- name: Wait for CoreDNS to be ready
+  kubernetes.core.k8s_info:
+    kind: Deployment
+    name: rke2-coredns-rke2-coredns
+    namespace: kube-system
+    kubeconfig: "{{ rke2_kubeconfig }}"
+    wait: true
+    wait_condition:
+      type: Available
+      status: "True"
+    wait_timeout: 120
+
+- name: Add Helm repositories
+  kubernetes.core.helm_repository:
+    name: sealed-secrets
+    repo_url: "{{ sealed_secrets_repo }}"
+  environment:
+    KUBECONFIG: "{{ rke2_kubeconfig }}"
+
+- name: Install Sealed Secrets Controller
+  kubernetes.core.helm:
+    name: sealed-secrets
+    chart_ref: sealed-secrets/sealed-secrets
+    release_namespace: kube-system
+    values:
+      fullnameOverride: sealed-secrets-controller
+    wait: true
+    wait_timeout: "{{ timeout_cattle_agent }}s"
+    kubeconfig: "{{ rke2_kubeconfig }}"
+  environment:
+    KUBECONFIG: "{{ rke2_kubeconfig }}"
+
+- name: Wait for node token to be generated
+  ansible.builtin.wait_for:
+    path: "{{ rke2_data_dir }}/server/node-token"
+    timeout: 120
+
+- name: Copy node token to shared directory
+  ansible.builtin.fetch:
+    src: "{{ rke2_data_dir }}/server/node-token"
+    dest: "{{ shared_dir }}/node-token{{ cluster_num }}"
+    flat: true
+
+- name: Read kubeconfig from remote
+  ansible.builtin.slurp:
+    src: "{{ rke2_kubeconfig }}"
+  register: remote_kubeconfig
+
+- name: Write modified kubeconfig to shared directory
+  ansible.builtin.copy:
+    content: "{{ remote_kubeconfig.content | b64decode | replace('127.0.0.1:6443', node_ip + ':6443') }}"
+    dest: "{{ shared_dir }}/kubeconfig-{{ cluster_name }}"
+    mode: '0644'
+  delegate_to: localhost
+  become: false
+
+- name: Create ArgoCD manager ServiceAccount
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: argocd-manager
+        namespace: kube-system
+    kubeconfig: "{{ rke2_kubeconfig }}"
+
+- name: Create ArgoCD manager ClusterRoleBinding
+  kubernetes.core.k8s:
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: argocd-manager-binding
+      subjects:
+        - kind: ServiceAccount
+          name: argocd-manager
+          namespace: kube-system
+      roleRef:
+        kind: ClusterRole
+        name: cluster-admin
+        apiGroup: rbac.authorization.k8s.io
+    kubeconfig: "{{ rke2_kubeconfig }}"

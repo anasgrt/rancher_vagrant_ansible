@@ -1,0 +1,92 @@
+---
+- name: Deploy Rancher Multi-Cluster Environment
+  hosts: all
+  gather_facts: true
+  become: true
+
+  tasks:
+    - name: Create shared directory for inter-host communication
+      file:
+        path: "{{ shared_dir }}"
+        state: directory
+        mode: '0755'
+      become: false
+      delegate_to: localhost
+      run_once: true
+
+- name: Deploy Rancher Management Server (local-ctrl)
+  hosts: management
+  gather_facts: true
+  become: true
+
+  roles:
+    - role: system_setup
+    - role: rke2_server
+    - role: rancher_server
+    - role: argocd
+      when: argocd_enabled | bool
+
+- name: Deploy Downstream Control Plane Nodes
+  hosts: key_control
+  gather_facts: true
+  become: true
+  serial: 1
+
+  roles:
+    - role: system_setup
+    - role: rke2_downstream_control
+    - role: rancher_agent_control
+
+- name: Deploy Downstream Worker Nodes
+  hosts: key_workers
+  gather_facts: true
+  become: true
+  serial: 1
+
+  roles:
+    - role: system_setup
+    - role: rke2_downstream_worker
+    - role: rancher_agent_worker
+
+# Phase 4: Fleet and Final Configuration
+- name: Configure Fleet GitOps
+  hosts: management
+  gather_facts: false
+  become: true
+
+  roles:
+    - role: fleet_setup
+      when: fleet_enabled | bool
+
+# Phase 5: Display Access Information
+- name: Display Access Information
+  hosts: management
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Show deployment summary
+      debug:
+        msg:
+          - "╔════════════════════════════════════════════════════════════════════════╗"
+          - "║      🎉 Rancher Ansible Environment - Deployment Complete             ║"
+          - "╚════════════════════════════════════════════════════════════════════════╝"
+          - ""
+          - "╔════════════════════════════════════════════════════════════════════════╗"
+          - "║                  🐮 Rancher Access Instructions                        ║"
+          - "╚════════════════════════════════════════════════════════════════════════╝"
+          - ""
+          - "🌐 Open browser: {{ rancher_url }}"
+          - "👤 Username: admin"
+          - "🔑 Password: {{ rancher_bootstrap_password }}"
+          - ""
+          - "╔════════════════════════════════════════════════════════════════════════╗"
+          - "║              🔒 Certificate Installation (macOS)                       ║"
+          - "╚════════════════════════════════════════════════════════════════════════╝"
+          - ""
+          - "To trust the self-signed certificate, run:"
+          - "  cd {{ playbook_dir }}"
+          - "  ./install-cert.sh"
+          - ""
+          - "Or manually import: {{ playbook_dir }}/rancher-ca.crt"
+          - ""
