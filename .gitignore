@@ -3,6 +3,9 @@ rancher-ca.crt
 *.key
 *.pem
 
+# Secrets directory (SSH keys, credentials)
+secrets/
+
 # Shared data directory (runtime data)
 .shared_data/
 
@@ -33,3 +36,5 @@ Thumbs.db
 
 # Test files
 test_*.yml
+
+.claude/

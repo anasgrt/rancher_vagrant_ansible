@@ -118,7 +118,7 @@
     kind: GitRepo
     metadata:
       name: {{ fleet_local_git_repo_name }}
-      namespace: {{ fleet_workspace_name }}
+      namespace: fleet-local
     spec:
       repo: {{ fleet_local_git_repo_url }}
       branch: {{ fleet_local_git_branch }}
@@ -135,9 +135,158 @@
   when: fleet_local_enabled | bool
   ignore_errors: true
 
+- name: Wait for Kargo namespace to be created by Fleet
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get namespace {{ kargo_project_name }} --no-headers"
+  register: kargo_ns_check
+  until: kargo_ns_check.rc == 0
+  retries: 60
+  delay: 10
+  when: kargo_enabled | bool and fleet_local_enabled | bool
+  ignore_errors: true
+
+- name: Wait for ArgoCD namespace to be created by Fleet
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get namespace argocd --no-headers"
+  register: argocd_ns_check
+  until: argocd_ns_check.rc == 0
+  retries: 60
+  delay: 10
+  when: argocd_enabled | bool and fleet_local_enabled | bool
+  ignore_errors: true
+
+- name: Read Git SSH private key for ArgoCD and Kargo
+  slurp:
+    src: "{{ kargo_git_ssh_private_key_path }}"
+  register: git_ssh_key_content
+  delegate_to: localhost
+  become: false
+  when: kargo_git_ssh_private_key_path is defined
+  ignore_errors: true
+
+- name: Create ArgoCD Git repository secret
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f - <<'EOF'
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: argocd-repo-git-credentials
+      namespace: argocd
+      labels:
+        argocd.argoproj.io/secret-type: repository
+    type: Opaque
+    stringData:
+      type: git
+      url: "{{ argocd_git_repo_url }}"
+      sshPrivateKey: {{ git_ssh_key_content.content | b64decode | to_json }}
+    EOF
+  when:
+    - argocd_enabled | bool
+    - git_ssh_key_content is defined
+    - git_ssh_key_content.content is defined
+    - argocd_ns_check.rc == 0
+  ignore_errors: true
+
+- name: Create Kargo Git credentials secret
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f - <<'EOF'
+    apiVersion: v1
+    kind: Secret
+    metadata:
+      name: git-credentials
+      namespace: {{ kargo_project_name }}
+      labels:
+        kargo.akuity.io/cred-type: git
+    type: Opaque
+    stringData:
+      repoURL: "{{ kargo_git_repo_url }}"
+      sshPrivateKey: {{ git_ssh_key_content.content | b64decode | to_json }}
+    EOF
+  when:
+    - kargo_enabled | bool
+    - git_ssh_key_content is defined
+    - git_ssh_key_content.content is defined
+    - kargo_ns_check.rc == 0
+  ignore_errors: true
+
+- name: Create namespaces for ArgoCD Applications
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} create namespace {{ item.namespace }} --dry-run=client -o yaml | \
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f -
+  loop: "{{ argocd_kargo_apps }}"
+  when:
+    - argocd_enabled | bool
+    - argocd_ns_check.rc == 0
+  ignore_errors: true
+
+- name: Create ArgoCD Applications aligned with Kargo stages
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f - <<EOF
+    apiVersion: argoproj.io/v1alpha1
+    kind: Application
+    metadata:
+      name: {{ item.name }}
+      namespace: {{ argocd_app_namespace }}
+      annotations:
+        kargo.akuity.io/authorized-stage: {{ kargo_project_name }}:{{ item.kargo_stage }}
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: default
+      source:
+        repoURL: {{ argocd_git_repo_url }}
+        targetRevision: {{ item.target_revision }}
+        path: {{ item.path }}
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: {{ item.namespace }}
+      syncPolicy:
+    {% if item.sync_policy == 'automated' %}
+        automated:
+          prune: {{ item.prune | default(false) | lower }}
+          selfHeal: {{ item.self_heal | default(false) | lower }}
+    {% endif %}
+        syncOptions:
+          - CreateNamespace=true
+    EOF
+  loop: "{{ argocd_kargo_apps }}"
+  when:
+    - argocd_enabled | bool
+    - argocd_ns_check.rc == 0
+  ignore_errors: true
+
+- name: Read ArgoCD password for display
+  slurp:
+    src: "{{ shared_dir }}/argocd_password"
+  register: argocd_password_content
+  delegate_to: localhost
+  become: false
+  ignore_errors: true
+
 - name: Display Fleet setup completion
   debug:
     msg:
       - "Fleet GitOps configured successfully"
       - "Key clusters GitRepo: {{ fleet_key_git_repo_name }}"
       - "Local cluster GitRepo: {{ fleet_local_git_repo_name }}"
+      - "Kargo Git credentials configured: {{ kargo_enabled | bool }}"
+      - "ArgoCD Applications created: {{ argocd_kargo_apps | length if argocd_enabled else 0 }}"
+
+- name: Display port-forward instructions
+  debug:
+    msg:
+      - "=============================================="
+      - "        PORT-FORWARD INSTRUCTIONS"
+      - "=============================================="
+      - ""
+      - "ArgoCD (access at https://localhost:9090):"
+      - "  Username: admin"
+      - "  Password: {{ argocd_password_content.content | b64decode | default('See /tmp/rancher_shared/argocd_password') }}"
+      - "  Command:"
+      - "  vagrant ssh local-ctrl -- -L 9090:localhost:9090 'sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl port-forward -n argocd svc/argocd-server 9090:443'"
+      - ""
+      - "Kargo (access at https://localhost:31444):"
+      - "  Username: admin"
+      - "  Password: {{ kargo_admin_password }}"
+      - "  Command:"
+      - "  vagrant ssh local-ctrl -- -L 31444:localhost:31444 'sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl port-forward -n kargo svc/kargo-api 31444:443'"
+      - ""
+      - "=============================================="
