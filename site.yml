@@ -23,8 +23,7 @@
     - role: system_setup
     - role: rke2_server
     - role: rancher_server
-    - role: argocd
-      when: argocd_enabled | bool
+    # ArgoCD is now deployed via Fleet GitOps (local/gitrepos/argocd)
 
 - name: Deploy Downstream Control Plane Nodes
   hosts: key_control

@@ -153,6 +153,30 @@
   when: argocd_enabled | bool and fleet_local_enabled | bool
   ignore_errors: true
 
+- name: Wait for ArgoCD server deployment to be ready
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n argocd rollout status deployment/argocd-server --timeout=300s"
+  register: argocd_server_ready
+  when: argocd_enabled | bool and argocd_ns_check.rc == 0
+  ignore_errors: true
+
+- name: Get ArgoCD initial admin password
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+  register: argocd_password
+  when: argocd_enabled | bool and argocd_ns_check.rc == 0
+  ignore_errors: true
+
+- name: Save ArgoCD password to shared directory
+  copy:
+    content: "{{ argocd_password.stdout }}"
+    dest: "{{ shared_dir }}/argocd_password"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
+  when:
+    - argocd_enabled | bool
+    - argocd_password is defined
+    - argocd_password.rc == 0
+
 - name: Read Git SSH private key for ArgoCD and Kargo
   slurp:
     src: "{{ kargo_git_ssh_private_key_path }}"
@@ -253,6 +277,65 @@
     - argocd_ns_check.rc == 0
   ignore_errors: true
 
+- name: Create ArgoCD Ingress for UI access
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f - <<'EOF'
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: argocd-server-ingress
+      namespace: argocd
+      annotations:
+        nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    spec:
+      ingressClassName: nginx
+      rules:
+      - host: argocd.{{ node_ip }}.nip.io
+        http:
+          paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  number: 80
+    EOF
+  when:
+    - argocd_enabled | bool
+    - argocd_ns_check.rc == 0
+  ignore_errors: true
+
+- name: Create Kargo Ingress for UI access
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f - <<'EOF'
+    apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: kargo-api-ingress
+      namespace: kargo
+      annotations:
+        nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+        nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+    spec:
+      ingressClassName: nginx
+      rules:
+      - host: kargo.{{ node_ip }}.nip.io
+        http:
+          paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kargo-api
+                port:
+                  number: 443
+    EOF
+  when:
+    - kargo_enabled | bool
+    - kargo_ns_check.rc == 0
+  ignore_errors: true
+
 - name: Read ArgoCD password for display
   slurp:
     src: "{{ shared_dir }}/argocd_password"
@@ -270,23 +353,58 @@
       - "Kargo Git credentials configured: {{ kargo_enabled | bool }}"
       - "ArgoCD Applications created: {{ argocd_kargo_apps | length if argocd_enabled else 0 }}"
 
-- name: Display port-forward instructions
+- name: Check Kargo production stages status
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get stages -n {{ kargo_project_name }} -o json"
+  register: kargo_stages_status
+  when: kargo_enabled | bool
+  ignore_errors: true
+
+- name: Display Kargo stages information
   debug:
     msg:
       - "=============================================="
-      - "        PORT-FORWARD INSTRUCTIONS"
+      - "        KARGO STAGES STATUS"
       - "=============================================="
       - ""
-      - "ArgoCD (access at https://localhost:9090):"
+      - "NOTE: Production stages (*-prd) will show as 'NotReady' in Fleet"
+      - "until you manually promote from their acceptance stages."
+      - "This is EXPECTED behavior for Kargo's promotion workflow."
+      - ""
+      - "To promote to production:"
+      - "  1. Access Kargo UI at https://localhost:31444"
+      - "  2. Select the acceptance stage (e.g., key01-acc)"
+      - "  3. Click 'Promote' to push changes to production (key01-prd)"
+      - ""
+      - "Alternatively, add these annotations to production stages"
+      - "in your Git repo to suppress Fleet warnings:"
+      - "  fleet.cattle.io/ignore-diff: 'status'"
+      - ""
+      - "=============================================="
+  when: kargo_enabled | bool
+
+- name: Display access instructions
+  debug:
+    msg:
+      - "=============================================="
+      - "        ACCESS INSTRUCTIONS"
+      - "=============================================="
+      - ""
+      - "ArgoCD UI:"
+      - "  URL: http://argocd.{{ node_ip }}.nip.io"
       - "  Username: admin"
       - "  Password: {{ argocd_password_content.content | b64decode | default('See /tmp/rancher_shared/argocd_password') }}"
-      - "  Command:"
-      - "  vagrant ssh local-ctrl -- -L 9090:localhost:9090 'sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl port-forward -n argocd svc/argocd-server 9090:443'"
       - ""
-      - "Kargo (access at https://localhost:31444):"
+      - "  Alternative (port-forward):"
+      - "    vagrant ssh local-ctrl -- -L 9090:localhost:9090 'sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl port-forward -n argocd svc/argocd-server 9090:80'"
+      - "    Then access at: http://localhost:9090"
+      - ""
+      - "Kargo UI:"
+      - "  URL: https://kargo.{{ node_ip }}.nip.io"
       - "  Username: admin"
       - "  Password: {{ kargo_admin_password }}"
-      - "  Command:"
-      - "  vagrant ssh local-ctrl -- -L 31444:localhost:31444 'sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl port-forward -n kargo svc/kargo-api 31444:443'"
+      - ""
+      - "  Alternative (port-forward):"
+      - "    vagrant ssh local-ctrl -- -L 31444:localhost:31444 'sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl port-forward -n kargo svc/kargo-api 31444:443'"
+      - "    Then access at: https://localhost:31444"
       - ""
       - "=============================================="
