@@ -60,6 +60,7 @@ git_ssh_private_key_path: "{{ playbook_dir }}/secrets/argocd_deploy_key"
 # Kargo, and applications are defined in the Fleet Git repository and managed
 # via GitOps. After initial bootstrap, make changes by committing to Git.
 # =============================================================================
+fleet_enabled: true
 fleet_bootstrap_repo_name: "fleet-bootstrap"
 fleet_bootstrap_repo_url: "https://github.com/anasgrt/rancher-fleet-test.git"
 fleet_bootstrap_branch: "main"
