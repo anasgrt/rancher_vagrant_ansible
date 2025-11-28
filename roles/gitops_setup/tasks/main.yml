@@ -1,4 +1,15 @@
 ---
+# =============================================================================
+# GitOps Bootstrap Role
+# =============================================================================
+# This role creates a SINGLE bootstrap GitRepo that points to the Fleet Git
+# repository. All other configuration (additional GitRepos, ArgoCD, Kargo,
+# applications) is managed via GitOps in the Fleet repository itself.
+#
+# After bootstrap, all changes should be made by committing to the Git repo.
+# Fleet will automatically reconcile any configuration drift.
+# =============================================================================
+
 - name: Wait for Rancher token
   wait_for:
     path: "{{ shared_dir }}/rancher_token"
@@ -16,6 +27,10 @@
 - name: Set Rancher token fact
   set_fact:
     rancher_token: "{{ rancher_token_content.content | b64decode | trim }}"
+
+# =============================================================================
+# Wait for clusters and Fleet controller
+# =============================================================================
 
 - name: Wait for downstream clusters to be registered in Rancher
   uri:
@@ -40,6 +55,10 @@
 - name: Wait for Fleet controller
   shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n cattle-fleet-system rollout status deployment/fleet-controller --timeout=300s"
   ignore_errors: true
+
+# =============================================================================
+# Label clusters for Fleet targeting
+# =============================================================================
 
 - name: Label downstream clusters for Fleet targeting
   uri:
@@ -80,69 +99,45 @@
     body_format: json
     body: |
       {%- set cluster = local_cluster.json.data[0] -%}
-      {%- set _ = cluster.labels.update({'env': fleet_local_environment, 'cluster': 'local'}) -%}
+      {%- set _ = cluster.labels.update({'env': 'management', 'cluster': 'local'}) -%}
       {{ cluster | to_json }}
     validate_certs: false
     status_code: [200, 201]
   when: local_cluster.json.data is defined and local_cluster.json.data | length > 0
   ignore_errors: true
 
-- name: Create Fleet GitRepo for key clusters
-  shell: |
-    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f - <<EOF
-    apiVersion: fleet.cattle.io/v1alpha1
-    kind: GitRepo
-    metadata:
-      name: {{ fleet_key_git_repo_name }}
-      namespace: {{ fleet_workspace_name }}
-    spec:
-      repo: {{ fleet_key_git_repo_url }}
-      branch: {{ fleet_key_git_branch }}
-      paths:
-    {% for path in fleet_key_git_paths %}
-        - {{ path }}
-    {% endfor %}
-      pollingInterval: {{ fleet_key_polling_interval }}
-      targets:
-      - clusterSelector:
-          matchLabels:
-            env: {{ fleet_key_environment }}
-    EOF
-  when: fleet_key_enabled | bool
-  ignore_errors: true
+# =============================================================================
+# Bootstrap GitRepo - This is the ONLY GitRepo Ansible creates
+# =============================================================================
+# The bootstrap GitRepo points to the 'bootstrap' folder in the Fleet repo.
+# This folder contains GitRepo manifests that Fleet will apply, which in turn
+# point to other folders for ArgoCD, Kargo, applications, etc.
+# =============================================================================
 
-- name: Create Fleet GitRepo for local cluster
+- name: Create bootstrap GitRepo for Fleet
   shell: |
     {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f - <<EOF
     apiVersion: fleet.cattle.io/v1alpha1
     kind: GitRepo
     metadata:
-      name: {{ fleet_local_git_repo_name }}
+      name: {{ fleet_bootstrap_repo_name }}
       namespace: fleet-local
     spec:
-      repo: {{ fleet_local_git_repo_url }}
-      branch: {{ fleet_local_git_branch }}
+      repo: {{ fleet_bootstrap_repo_url }}
+      branch: {{ fleet_bootstrap_branch }}
       paths:
-    {% for path in fleet_local_git_paths %}
-        - {{ path }}
-    {% endfor %}
-      pollingInterval: {{ fleet_local_polling_interval }}
+        - {{ fleet_bootstrap_path }}
+      pollingInterval: {{ fleet_bootstrap_polling_interval }}
       targets:
-      - clusterSelector:
-          matchLabels:
-            env: {{ fleet_local_environment }}
+        - clusterSelector:
+            matchLabels:
+              cluster: local
     EOF
-  when: fleet_local_enabled | bool
   ignore_errors: true
 
-- name: Wait for Kargo namespace to be created by Fleet
-  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get namespace {{ kargo_project_name }} --no-headers"
-  register: kargo_ns_check
-  until: kargo_ns_check.rc == 0
-  retries: 60
-  delay: 10
-  when: kargo_enabled | bool and fleet_local_enabled | bool
-  ignore_errors: true
+# =============================================================================
+# Wait for GitOps tools to be deployed by Fleet
+# =============================================================================
 
 - name: Wait for ArgoCD namespace to be created by Fleet
   shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get namespace argocd --no-headers"
@@ -150,7 +145,7 @@
   until: argocd_ns_check.rc == 0
   retries: 60
   delay: 10
-  when: argocd_enabled | bool and fleet_local_enabled | bool
+  when: argocd_enabled | bool
   ignore_errors: true
 
 - name: Wait for ArgoCD server deployment to be ready
@@ -159,31 +154,26 @@
   when: argocd_enabled | bool and argocd_ns_check.rc == 0
   ignore_errors: true
 
-- name: Get ArgoCD initial admin password
-  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
-  register: argocd_password
-  when: argocd_enabled | bool and argocd_ns_check.rc == 0
+- name: Wait for Kargo namespace to be created by Fleet
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get namespace {{ kargo_project_name }} --no-headers"
+  register: kargo_ns_check
+  until: kargo_ns_check.rc == 0
+  retries: 60
+  delay: 10
+  when: kargo_enabled | bool
   ignore_errors: true
 
-- name: Save ArgoCD password to shared directory
-  copy:
-    content: "{{ argocd_password.stdout }}"
-    dest: "{{ shared_dir }}/argocd_password"
-    mode: '0600'
-  delegate_to: localhost
-  become: false
-  when:
-    - argocd_enabled | bool
-    - argocd_password is defined
-    - argocd_password.rc == 0
+# =============================================================================
+# Create secrets (these contain sensitive data, not stored in Git)
+# =============================================================================
 
 - name: Read Git SSH private key for ArgoCD and Kargo
   slurp:
-    src: "{{ kargo_git_ssh_private_key_path }}"
+    src: "{{ git_ssh_private_key_path }}"
   register: git_ssh_key_content
   delegate_to: localhost
   become: false
-  when: kargo_git_ssh_private_key_path is defined
+  when: git_ssh_private_key_path is defined
   ignore_errors: true
 
 - name: Create ArgoCD Git repository secret
@@ -231,110 +221,27 @@
     - kargo_ns_check.rc == 0
   ignore_errors: true
 
-- name: Create namespaces for ArgoCD Applications
-  shell: |
-    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} create namespace {{ item.namespace }} --dry-run=client -o yaml | \
-    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f -
-  loop: "{{ argocd_kargo_apps }}"
-  when:
-    - argocd_enabled | bool
-    - argocd_ns_check.rc == 0
+# =============================================================================
+# Get ArgoCD password for display
+# =============================================================================
+
+- name: Get ArgoCD initial admin password
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
+  register: argocd_password
+  when: argocd_enabled | bool and argocd_ns_check.rc == 0
   ignore_errors: true
 
-- name: Create ArgoCD Applications aligned with Kargo stages
-  shell: |
-    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f - <<EOF
-    apiVersion: argoproj.io/v1alpha1
-    kind: Application
-    metadata:
-      name: {{ item.name }}
-      namespace: {{ argocd_app_namespace }}
-      annotations:
-        kargo.akuity.io/authorized-stage: {{ kargo_project_name }}:{{ item.kargo_stage }}
-      finalizers:
-        - resources-finalizer.argocd.argoproj.io
-    spec:
-      project: default
-      source:
-        repoURL: {{ argocd_git_repo_url }}
-        targetRevision: {{ item.target_revision }}
-        path: {{ item.path }}
-      destination:
-        server: https://kubernetes.default.svc
-        namespace: {{ item.namespace }}
-      syncPolicy:
-    {% if item.sync_policy == 'automated' %}
-        automated:
-          prune: {{ item.prune | default(false) | lower }}
-          selfHeal: {{ item.self_heal | default(false) | lower }}
-    {% endif %}
-        syncOptions:
-          - CreateNamespace=true
-    EOF
-  loop: "{{ argocd_kargo_apps }}"
+- name: Save ArgoCD password to shared directory
+  copy:
+    content: "{{ argocd_password.stdout }}"
+    dest: "{{ shared_dir }}/argocd_password"
+    mode: '0600'
+  delegate_to: localhost
+  become: false
   when:
     - argocd_enabled | bool
-    - argocd_ns_check.rc == 0
-  ignore_errors: true
-
-- name: Create ArgoCD Ingress for UI access
-  shell: |
-    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f - <<'EOF'
-    apiVersion: networking.k8s.io/v1
-    kind: Ingress
-    metadata:
-      name: argocd-server-ingress
-      namespace: argocd
-      annotations:
-        nginx.ingress.kubernetes.io/ssl-redirect: "false"
-    spec:
-      ingressClassName: nginx
-      rules:
-      - host: argocd.{{ node_ip }}.nip.io
-        http:
-          paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: argocd-server
-                port:
-                  number: 80
-    EOF
-  when:
-    - argocd_enabled | bool
-    - argocd_ns_check.rc == 0
-  ignore_errors: true
-
-- name: Create Kargo Ingress for UI access
-  shell: |
-    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} apply -f - <<'EOF'
-    apiVersion: networking.k8s.io/v1
-    kind: Ingress
-    metadata:
-      name: kargo-api-ingress
-      namespace: kargo
-      annotations:
-        nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
-        nginx.ingress.kubernetes.io/ssl-passthrough: "true"
-    spec:
-      ingressClassName: nginx
-      rules:
-      - host: kargo.{{ node_ip }}.nip.io
-        http:
-          paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: kargo-api
-                port:
-                  number: 443
-    EOF
-  when:
-    - kargo_enabled | bool
-    - kargo_ns_check.rc == 0
-  ignore_errors: true
+    - argocd_password is defined
+    - argocd_password.rc == 0
 
 - name: Read ArgoCD password for display
   slurp:
@@ -344,43 +251,27 @@
   become: false
   ignore_errors: true
 
-- name: Display Fleet setup completion
-  debug:
-    msg:
-      - "Fleet GitOps configured successfully"
-      - "Key clusters GitRepo: {{ fleet_key_git_repo_name }}"
-      - "Local cluster GitRepo: {{ fleet_local_git_repo_name }}"
-      - "Kargo Git credentials configured: {{ kargo_enabled | bool }}"
-      - "ArgoCD Applications created: {{ argocd_kargo_apps | length if argocd_enabled else 0 }}"
+# =============================================================================
+# Display completion information
+# =============================================================================
 
-- name: Check Kargo production stages status
-  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get stages -n {{ kargo_project_name }} -o json"
-  register: kargo_stages_status
-  when: kargo_enabled | bool
-  ignore_errors: true
-
-- name: Display Kargo stages information
+- name: Display GitOps bootstrap completion
   debug:
     msg:
       - "=============================================="
-      - "        KARGO STAGES STATUS"
+      - "        GITOPS BOOTSTRAP COMPLETE"
       - "=============================================="
       - ""
-      - "NOTE: Production stages (*-prd) will show as 'NotReady' in Fleet"
-      - "until you manually promote from their acceptance stages."
-      - "This is EXPECTED behavior for Kargo's promotion workflow."
+      - "Bootstrap GitRepo created: {{ fleet_bootstrap_repo_name }}"
+      - "Repository: {{ fleet_bootstrap_repo_url }}"
+      - "Branch: {{ fleet_bootstrap_branch }}"
+      - "Path: {{ fleet_bootstrap_path }}"
       - ""
-      - "To promote to production:"
-      - "  1. Access Kargo UI at https://localhost:31444"
-      - "  2. Select the acceptance stage (e.g., key01-acc)"
-      - "  3. Click 'Promote' to push changes to production (key01-prd)"
-      - ""
-      - "Alternatively, add these annotations to production stages"
-      - "in your Git repo to suppress Fleet warnings:"
-      - "  fleet.cattle.io/ignore-diff: 'status'"
+      - "All further configuration is managed via GitOps."
+      - "To make changes, commit to the Git repository."
+      - "Fleet will automatically reconcile."
       - ""
       - "=============================================="
-  when: kargo_enabled | bool
 
 - name: Display access instructions
   debug:
@@ -392,7 +283,7 @@
       - "ArgoCD UI:"
       - "  URL: http://argocd.{{ node_ip }}.nip.io"
       - "  Username: admin"
-      - "  Password: {{ argocd_password_content.content | b64decode | default('See /tmp/rancher_shared/argocd_password') }}"
+      - "  Password: {{ argocd_password_content.content | b64decode | default('See .shared/argocd_password') }}"
       - ""
       - "  Alternative (port-forward):"
       - "    vagrant ssh local-ctrl -- -L 9090:localhost:9090 'sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl port-forward -n argocd svc/argocd-server 9090:80'"

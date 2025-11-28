@@ -44,75 +44,28 @@ disable_ingress_nginx_management: false
 argocd_enabled: true
 argocd_git_repo_url: "git@github.com:anasgrt/rancher-argocd-test.git"
 argocd_app_namespace: "argocd"
-argocd_cluster_name: "rancher-vagrant-cluster"
-
-# ArgoCD Applications aligned with Kargo stages
-argocd_kargo_apps:
-  - name: "key01-acc"
-    namespace: "key01-acc"
-    target_revision: "stage/key01-acc"
-    path: "customers/key01/acc"
-    sync_policy: "automated"
-    self_heal: true
-    prune: true
-    kargo_stage: "key01-acc"
-  - name: "key01-prd"
-    namespace: "key01-prd"
-    target_revision: "stage/key01-prd"
-    path: "customers/key01/prd"
-    sync_policy: "automated"
-    self_heal: true
-    prune: true
-    kargo_stage: "key01-prd"
-  - name: "key02-acc"
-    namespace: "key02-acc"
-    target_revision: "stage/key02-acc"
-    path: "customers/key02/acc"
-    sync_policy: "automated"
-    self_heal: true
-    prune: true
-    kargo_stage: "key02-acc"
-  - name: "key02-prd"
-    namespace: "key02-prd"
-    target_revision: "stage/key02-prd"
-    path: "customers/key02/prd"
-    sync_policy: "automated"
-    self_heal: true
-    prune: true
-    kargo_stage: "key02-prd"
 
 kargo_enabled: true
 kargo_admin_password: "admin"
 kargo_project_name: "hello-kargo"
 kargo_git_repo_url: "git@github.com:anasgrt/rancher-argocd-test.git"
-kargo_git_ssh_private_key_path: "{{ playbook_dir }}/secrets/argocd_deploy_key"
 
+# Shared SSH key for ArgoCD and Kargo Git access
+git_ssh_private_key_path: "{{ playbook_dir }}/secrets/argocd_deploy_key"
+
+# =============================================================================
+# Fleet Bootstrap Configuration
+# =============================================================================
+# Ansible creates ONLY this bootstrap GitRepo. All other GitRepos, ArgoCD,
+# Kargo, and applications are defined in the Fleet Git repository and managed
+# via GitOps. After initial bootstrap, make changes by committing to Git.
+# =============================================================================
 fleet_enabled: true
-fleet_workspace_name: "fleet-default"
-
-# Fleet - Key Clusters (downstream/workload)
-fleet_key_enabled: true
-fleet_key_git_repo_url: "https://github.com/anasgrt/rancher-fleet-test.git"
-fleet_key_git_branch: "main"
-fleet_key_git_repo_name: "key-manifests"
-fleet_key_cluster_group: "key-clusters"
-fleet_key_polling_interval: "15s"
-fleet_key_environment: "key"
-fleet_key_git_paths:
-  - "key/gitrepos/common"
-  - "key/gitrepos/acc"
-  - "key/gitrepos/prd"
-
-# Fleet - Local Cluster (management)
-fleet_local_enabled: true
-fleet_local_git_repo_url: "https://github.com/anasgrt/rancher-fleet-test.git"
-fleet_local_git_branch: "main"
-fleet_local_git_repo_name: "local-manifests"
-fleet_local_cluster_group: "local-cluster"
-fleet_local_polling_interval: "15s"
-fleet_local_environment: "management"
-fleet_local_git_paths:
-  - "local/gitrepos"
+fleet_bootstrap_repo_name: "fleet-bootstrap"
+fleet_bootstrap_repo_url: "https://github.com/anasgrt/rancher-fleet-test.git"
+fleet_bootstrap_branch: "main"
+fleet_bootstrap_path: "bootstrap"
+fleet_bootstrap_polling_interval: "15s"
 
 downstream_clusters:
   - name: "key"

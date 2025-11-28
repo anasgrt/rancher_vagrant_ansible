@@ -67,12 +67,10 @@ Key settings:
 - `rke2_version`: RKE2 version
 - `cni`: Network plugin (canal/cilium/calico)
 - `argocd_enabled`: Enable ArgoCD deployment
-- `argocd_kargo_apps`: ArgoCD applications for Kargo stages (key01-acc, key01-prd, key02-acc, key02-prd)
 - `kargo_enabled`: Enable Kargo progressive delivery
-- `kargo_git_repo_url`: Git repo for Kargo to monitor
-- `fleet_enabled`: Enable Fleet GitOps
-- `fleet_key_git_repo_url`: Fleet GitRepo for key cluster workloads
-- `fleet_local_git_repo_url`: Fleet GitRepo for management cluster (Kargo, ArgoCD, monitoring)
+- `fleet_bootstrap_repo_url`: Fleet Git repository URL (bootstrap entry point)
+- `fleet_bootstrap_path`: Path in the repo for bootstrap manifests
+- `git_ssh_private_key_path`: SSH key for ArgoCD/Kargo Git access
 
 ## Access
 
@@ -160,26 +158,36 @@ ansible/
 
 ## GitOps Repository Structure
 
-The Fleet GitRepos reference: `https://github.com/anasgrt/rancher-fleet-test.git`
+The Fleet GitRepo references: `https://github.com/anasgrt/rancher-fleet-test.git`
+
+**Bootstrap Pattern**: Ansible creates a single bootstrap GitRepo pointing to the `bootstrap/` folder. Fleet then applies the GitRepo manifests inside, which in turn manage all other resources.
 
 ```text
 rancher-fleet-test/
+├── bootstrap/               # Entry point - Ansible points here
+│   └── gitrepos/            # Contains GitRepo manifests for:
+│       ├── local-cluster.yaml   # → local/gitrepos/
+│       └── key-clusters.yaml    # → key/gitrepos/
 ├── local/gitrepos/          # Management cluster workloads
 │   ├── argocd/              # ArgoCD deployment
+│   ├── argocd-config/       # ArgoCD ingress configuration
 │   ├── kargo-helm/          # Kargo Helm chart
+│   ├── kargo-config/        # Kargo ingress configuration
 │   ├── kargo-namespace/     # Kargo namespace and project
 │   ├── kargo-resources/     # Kargo stages, warehouses, RBAC
 │   └── monitoring/          # Prometheus/monitoring
 └── key/gitrepos/            # Downstream key cluster workloads
     ├── common/              # Shared workloads (nginx-ingress)
-    ├── acc/                 # Acceptance environment
+    ├── dev/                 # Development environment
     └── prd/                 # Production environment
 ```
 
 ## Notes
 
 - Playbooks are idempotent (safe to re-run)
+- **Bootstrap Pattern**: Ansible creates only ONE bootstrap GitRepo; all other configuration is managed via GitOps
 - ArgoCD and Kargo are deployed via Fleet GitOps, not directly by Ansible
-- Fleet manages two separate GitRepos (local-manifests for management, key-manifests for downstream)
-- Kargo stages align with ArgoCD applications for progressive delivery
+- Secrets (SSH keys) are created by Ansible since they shouldn't be stored in Git
+- After bootstrap, make changes by committing to the Fleet Git repository
+- Fleet will automatically reconcile any configuration drift
 - Works with Vagrant (local) or any infrastructure (bare metal, VMs, cloud)
