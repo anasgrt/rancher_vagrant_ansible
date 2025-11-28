@@ -136,13 +136,36 @@
   ignore_errors: true
 
 # =============================================================================
-# Wait for GitOps tools to be deployed by Fleet
+# Wait for Fleet bundles to be deployed
+# =============================================================================
+# Fleet follows a hierarchy:
+# 1. Bootstrap GitRepo creates local-manifests GitRepo
+# 2. local-manifests GitRepo creates bundles for ArgoCD, Kargo, etc.
+# We need to wait for Fleet bundles to be ready before checking resources.
 # =============================================================================
 
-- name: Wait for ArgoCD namespace to be created by Fleet
-  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get namespace argocd --no-headers"
-  register: argocd_ns_check
-  until: argocd_ns_check.rc == 0
+- name: Wait for bootstrap GitRepo to be processed by Fleet
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get gitrepo {{ fleet_bootstrap_repo_name }} -n fleet-local --no-headers"
+  register: bootstrap_gitrepo_check
+  until: bootstrap_gitrepo_check.rc == 0
+  retries: 30
+  delay: 5
+  ignore_errors: true
+
+- name: Wait for local-manifests GitRepo to be created by bootstrap
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get gitrepo local-manifests -n fleet-local --no-headers"
+  register: local_manifests_gitrepo_check
+  until: local_manifests_gitrepo_check.rc == 0
+  retries: 60
+  delay: 5
+  ignore_errors: true
+
+- name: Wait for ArgoCD bundle to be ready in Fleet
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get bundle local-manifests-local-gitrepos-argocd -n fleet-local \
+      -o jsonpath='{.status.summary.ready}'
+  register: argocd_bundle_check
+  until: argocd_bundle_check.stdout | int == 1
   retries: 60
   delay: 10
   when: argocd_enabled | bool
@@ -151,16 +174,65 @@
 - name: Wait for ArgoCD server deployment to be ready
   shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n argocd rollout status deployment/argocd-server --timeout=300s"
   register: argocd_server_ready
-  when: argocd_enabled | bool and argocd_ns_check.rc == 0
+  when: argocd_enabled | bool and argocd_bundle_check is defined and argocd_bundle_check.stdout | default('0') | int == 1
   ignore_errors: true
 
-- name: Wait for Kargo namespace to be created by Fleet
-  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get namespace {{ kargo_project_name }} --no-headers"
-  register: kargo_ns_check
-  until: kargo_ns_check.rc == 0
+- name: Wait for Kargo namespace bundle to be ready in Fleet
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get bundle local-manifests-local-gitrepos-kargo-namespace -n fleet-local \
+      -o jsonpath='{.status.summary.ready}'
+  register: kargo_namespace_bundle_check
+  until: kargo_namespace_bundle_check.stdout | int == 1
   retries: 60
   delay: 10
   when: kargo_enabled | bool
+  ignore_errors: true
+
+- name: Wait for Kargo namespace to exist
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get namespace {{ kargo_project_name }} --no-headers"
+  register: kargo_ns_check
+  until: kargo_ns_check.rc == 0
+  retries: 30
+  delay: 5
+  when: kargo_enabled | bool and kargo_namespace_bundle_check is defined and kargo_namespace_bundle_check.stdout | default('0') | int == 1
+  ignore_errors: true
+
+# =============================================================================
+# Workaround for Fleet reconciliation bug
+# =============================================================================
+# Fleet sometimes incorrectly reports kargo-namespace bundle as not ready
+# even when it is deployed. Force reconciliation to resolve this.
+# =============================================================================
+
+- name: Get argocd-apps bundledeployment namespace
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get bundledeployments -A \
+      -l fleet.cattle.io/bundle-name=local-manifests-local-gitrepos-argocd-apps \
+      -o jsonpath='{.items[0].metadata.namespace}'
+  register: argocd_apps_bd_namespace
+  when: argocd_enabled | bool
+  ignore_errors: true
+
+- name: Force reconciliation of argocd-apps bundle to resolve dependency timing issue
+  shell: |
+    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} annotate bundledeployment \
+      local-manifests-local-gitrepos-argocd-apps \
+      -n {{ argocd_apps_bd_namespace.stdout }} \
+      fleet.cattle.io/force-reconcile="$(date +%s)" --overwrite
+  when:
+    - argocd_enabled | bool
+    - argocd_apps_bd_namespace is defined
+    - argocd_apps_bd_namespace.stdout is defined
+    - argocd_apps_bd_namespace.stdout | length > 0
+  ignore_errors: true
+
+- name: Wait for ArgoCD applications to be created
+  shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get applications -n argocd --no-headers"
+  register: argocd_apps_check
+  until: argocd_apps_check.rc == 0 and argocd_apps_check.stdout_lines | length > 0
+  retries: 30
+  delay: 5
+  when: argocd_enabled | bool
   ignore_errors: true
 
 # =============================================================================
@@ -196,7 +268,8 @@
     - argocd_enabled | bool
     - git_ssh_key_content is defined
     - git_ssh_key_content.content is defined
-    - argocd_ns_check.rc == 0
+    - argocd_bundle_check is defined
+    - argocd_bundle_check.stdout | default('0') | int == 1
   ignore_errors: true
 
 - name: Create Kargo Git credentials secret
@@ -218,7 +291,8 @@
     - kargo_enabled | bool
     - git_ssh_key_content is defined
     - git_ssh_key_content.content is defined
-    - kargo_ns_check.rc == 0
+    - kargo_namespace_bundle_check is defined
+    - kargo_namespace_bundle_check.stdout | default('0') | int == 1
   ignore_errors: true
 
 # =============================================================================
@@ -228,7 +302,7 @@
 - name: Get ArgoCD initial admin password
   shell: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d"
   register: argocd_password
-  when: argocd_enabled | bool and argocd_ns_check.rc == 0
+  when: argocd_enabled | bool and argocd_server_ready is defined and argocd_server_ready.rc | default(1) == 0
   ignore_errors: true
 
 - name: Save ArgoCD password to shared directory
