@@ -1,0 +1,102 @@
+---
+- name: Verify control plane is reachable
+  ansible.builtin.wait_for:
+    host: "{{ control_plane_ip }}"
+    port: 9345
+    timeout: 180
+
+- name: Include common RKE2 installation tasks
+  ansible.builtin.include_role:
+    name: rke2_common
+  vars:
+    rke2_type: agent
+
+- name: Wait for node token from control plane
+  ansible.builtin.wait_for:
+    path: "{{ shared_dir }}/node-token{{ cluster_num }}"
+    timeout: 300
+  delegate_to: localhost
+  become: false
+
+- name: Read node token
+  ansible.builtin.slurp:
+    src: "{{ shared_dir }}/node-token{{ cluster_num }}"
+  register: node_token_content
+  delegate_to: localhost
+  become: false
+
+- name: Set node token fact
+  ansible.builtin.set_fact:
+    rke2_token: "{{ node_token_content.content | b64decode | trim }}"
+
+- name: Configure RKE2 agent
+  ansible.builtin.copy:
+    dest: "{{ rke2_config_dir }}/config.yaml"
+    content: |
+      node-ip: {{ node_ip }}
+      node-name: {{ node_name }}
+      server: https://{{ control_plane_ip }}:9345
+      token: {{ rke2_token }}
+    mode: '0644'
+
+- name: Enable and start RKE2 agent service
+  ansible.builtin.systemd:
+    name: rke2-agent
+    enabled: true
+    state: started
+
+- name: Wait for RKE2 agent to be active
+  ansible.builtin.systemd:
+    name: rke2-agent
+  register: rke2_agent_status
+  until: rke2_agent_status.status.ActiveState == "active"
+  retries: "{{ (timeout_rke2_agent_start / 10) | int }}"
+  delay: 10
+
+- name: Verify connection to control plane
+  ansible.builtin.uri:
+    url: "https://{{ control_plane_ip }}:9345/ping"
+    validate_certs: false
+    status_code: 200
+  register: control_plane_ping
+  until: control_plane_ping.status == 200
+  retries: 36
+  delay: 5
+  failed_when: false
+
+- name: Wait for shared kubeconfig
+  ansible.builtin.wait_for:
+    path: "{{ shared_dir }}/kubeconfig-{{ cluster_name }}"
+    timeout: 300
+  delegate_to: localhost
+  become: false
+
+- name: Create .kube directory for vagrant user
+  ansible.builtin.file:
+    path: /home/vagrant/.kube
+    state: directory
+    owner: vagrant
+    group: vagrant
+    mode: '0755'
+
+- name: Copy shared kubeconfig
+  ansible.builtin.copy:
+    src: "{{ shared_dir }}/kubeconfig-{{ cluster_name }}"
+    dest: /home/vagrant/.kube/config
+    mode: '0644'
+    owner: vagrant
+    group: vagrant
+
+- name: Configure kubectl environment for vagrant user
+  ansible.builtin.blockinfile:
+    path: /home/vagrant/.bashrc
+    block: |
+      export PATH={{ rke2_bin_path }}:/usr/local/bin:$PATH
+      export KUBECONFIG=/home/vagrant/.kube/config
+      alias k=kubectl
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - kubectl"
+    create: true
+
+- name: Wait for node registration
+  ansible.builtin.pause:
+    seconds: "{{ timeout_node_registration }}"

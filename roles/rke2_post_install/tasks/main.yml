@@ -1,0 +1,28 @@
+---
+# Post-installation tasks for RKE2 (kubectl, helm, environment)
+# This role should be included AFTER the RKE2 service has started
+
+- name: Install kubectl symlink
+  ansible.builtin.file:
+    src: "{{ rke2_bin_path }}/kubectl"
+    dest: /usr/local/bin/kubectl
+    state: link
+  failed_when: false
+
+- name: Configure kubectl environment
+  ansible.builtin.blockinfile:
+    path: "{{ item }}"
+    block: |
+      export PATH={{ rke2_bin_path }}:/usr/local/bin:$PATH
+      export KUBECONFIG={{ rke2_kubeconfig }}
+      alias k=kubectl
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - kubectl"
+    create: true
+  loop:
+    - /home/vagrant/.bashrc
+    - /root/.bashrc
+
+- name: Install Helm
+  ansible.builtin.shell: curl -sSL https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
+  args:
+    creates: /usr/local/bin/helm

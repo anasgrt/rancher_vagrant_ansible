@@ -1,0 +1,40 @@
+# Generated certificates and secrets
+rancher-ca.crt
+*.key
+*.pem
+
+# Secrets directory (SSH keys, credentials)
+secrets/
+
+# Shared data directory (runtime data)
+.shared/
+
+# Ansible retry files
+*.retry
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.idea/
+.vscode/
+*.code-workspace
+
+# Vagrant files (if accidentally placed here)
+.vagrant/
+
+# Test files
+test_*.yml
+
+.claude/
