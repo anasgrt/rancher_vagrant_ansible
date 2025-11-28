@@ -18,6 +18,59 @@
       {{ base_ip }}.{{ management_ip_num }} {{ base_ip }}.{{ management_ip_num }}.nip.io
     marker: "# {mark} ANSIBLE MANAGED BLOCK - Rancher"
 
+- name: Add all cluster nodes to /etc/hosts
+  blockinfile:
+    path: /etc/hosts
+    block: |
+      # Cluster Nodes
+      192.168.56.10 local-ctrl
+      192.168.56.20 key-ctrl
+      192.168.56.21 key-worker
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - Cluster Nodes"
+
+- name: Ensure .ssh directory exists for vagrant user
+  file:
+    path: /home/vagrant/.ssh
+    state: directory
+    owner: vagrant
+    group: vagrant
+    mode: '0700'
+
+- name: Generate SSH key for vagrant user if not exists
+  become_user: vagrant
+  openssh_keypair:
+    path: /home/vagrant/.ssh/id_rsa
+    type: rsa
+    size: 2048
+    state: present
+    force: false
+
+- name: Read vagrant user's public key
+  slurp:
+    src: /home/vagrant/.ssh/id_rsa.pub
+  register: vagrant_pubkey
+
+- name: Distribute SSH public keys to all nodes
+  authorized_key:
+    user: vagrant
+    state: present
+    key: "{{ hostvars[item]['vagrant_pubkey']['content'] | b64decode }}"
+  loop: "{{ groups['all'] }}"
+  when: hostvars[item]['vagrant_pubkey'] is defined
+
+- name: Configure SSH client settings for vagrant user
+  blockinfile:
+    path: /home/vagrant/.ssh/config
+    create: true
+    owner: vagrant
+    group: vagrant
+    mode: '0600'
+    block: |
+      Host *
+        StrictHostKeyChecking no
+        UserKnownHostsFile=/dev/null
+    marker: "# {mark} ANSIBLE MANAGED BLOCK - SSH Config"
+
 - name: Stop and disable systemd-resolved
   systemd:
     name: systemd-resolved

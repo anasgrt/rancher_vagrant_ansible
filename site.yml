@@ -21,6 +21,7 @@
 
   roles:
     - role: system_setup
+      tags: ['system_setup']
     - role: rke2_server
     - role: rancher_server
     # ArgoCD is now deployed via Fleet GitOps (local/gitrepos/argocd)
@@ -33,6 +34,7 @@
 
   roles:
     - role: system_setup
+      tags: ['system_setup']
     - role: rke2_downstream_control
     - role: rancher_agent_control
 
@@ -44,6 +46,7 @@
 
   roles:
     - role: system_setup
+      tags: ['system_setup']
     - role: rke2_downstream_worker
     - role: rancher_agent_worker
 
