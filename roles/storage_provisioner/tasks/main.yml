@@ -1,0 +1,23 @@
+---
+- name: Deploy local-path storage provisioner
+  shell: |
+    export KUBECONFIG={{ rke2_kubeconfig }}
+    kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.30/deploy/local-path-storage.yaml
+  args:
+    executable: /bin/bash
+
+- name: Wait for local-path provisioner to be ready
+  shell: |
+    export KUBECONFIG={{ rke2_kubeconfig }}
+    kubectl wait --for=condition=available --timeout=300s deployment/local-path-provisioner -n local-path-storage
+  args:
+    executable: /bin/bash
+  retries: 3
+  delay: 10
+
+- name: Set local-path as default storage class
+  shell: |
+    export KUBECONFIG={{ rke2_kubeconfig }}
+    kubectl patch storageclass local-path -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+  args:
+    executable: /bin/bash

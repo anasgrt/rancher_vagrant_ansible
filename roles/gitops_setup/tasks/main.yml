@@ -317,14 +317,6 @@
     - argocd_password is defined
     - argocd_password.rc == 0
 
-- name: Read ArgoCD password for display
-  slurp:
-    src: "{{ shared_dir }}/argocd_password"
-  register: argocd_password_content
-  delegate_to: localhost
-  become: false
-  ignore_errors: true
-
 # =============================================================================
 # Display completion information
 # =============================================================================
@@ -347,41 +339,3 @@
       - ""
       - "=============================================="
 
-- name: Display access instructions
-  debug:
-    msg:
-      - "╔════════════════════════════════════════════════════════════════════════╗"
-      - "║                    📊 GitOps Platform Access                           ║"
-      - "╚════════════════════════════════════════════════════════════════════════╝"
-      - ""
-      - "🔷 ArgoCD - Continuous Delivery"
-      - "  🌐 URL: http://argocd.{{ node_ip }}.nip.io"
-      - "  👤 Username: admin"
-      - "  🔑 Password: {{ argocd_password_content.content | b64decode | default('See .shared/argocd_password') }}"
-      - ""
-      - "  📦 Alternative (port-forward):"
-      - "    vagrant ssh local-ctrl -- -L 9090:localhost:9090 'sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl port-forward -n argocd svc/argocd-server 9090:80'"
-      - "    Then access: http://localhost:9090"
-      - ""
-      - "🔷 Kargo - Promotion Workflow Engine"
-      - "  🌐 URL: https://kargo.{{ node_ip }}.nip.io"
-      - "  👤 Username: admin"
-      - "  🔑 Password: {{ kargo_admin_password }}"
-      - ""
-      - "  📦 Alternative (port-forward):"
-      - "    vagrant ssh local-ctrl -- -L 31444:localhost:31444 'sudo KUBECONFIG=/etc/rancher/rke2/rke2.yaml kubectl port-forward -n kargo svc/kargo-api 31444:443'"
-      - "    Then access: https://localhost:31444"
-      - ""
-      - "🔷 Grafana - Metrics Visualization"
-      - "  🌐 URL: http://grafana.{{ node_ip }}.nip.io"
-      - "  👤 Username: admin"
-      - "  🔑 Password: admin"
-      - ""
-      - "🔷 Prometheus - Metrics & Monitoring"
-      - "  🌐 URL: http://prometheus.{{ node_ip }}.nip.io"
-      - "  📊 Pre-configured to scrape all K8s components"
-      - ""
-      - "╔════════════════════════════════════════════════════════════════════════╗"
-      - "║  💡 Tip: All services are managed by Fleet GitOps from:               ║"
-      - "║      https://github.com/anasgrt/rancher-fleet-test                     ║"
-      - "╚════════════════════════════════════════════════════════════════════════╝"

@@ -23,6 +23,7 @@
     - role: system_setup
       tags: ['system_setup']
     - role: rke2_server
+    - role: storage_provisioner
     - role: rancher_server
     # ArgoCD is now deployed via Fleet GitOps (local/gitrepos/argocd)
 
@@ -67,6 +68,21 @@
   become: true
 
   tasks:
+    - name: Get Grafana admin password
+      shell: |
+        export KUBECONFIG={{ rke2_kubeconfig }}
+        kubectl -n prometheus-monitoring get secret prometheus-grafana -o jsonpath='{.data.admin-password}' | base64 -d
+      register: grafana_password
+      failed_when: false
+
+    - name: Get ArgoCD admin password
+      shell: |
+        export KUBECONFIG={{ rke2_kubeconfig }}
+        kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+      register: argocd_password
+      failed_when: false
+      when: argocd_enabled | bool
+
     - name: Show deployment summary
       debug:
         msg:
@@ -83,12 +99,27 @@
           - "🔑 Password: {{ rancher_bootstrap_password }}"
           - ""
           - "╔════════════════════════════════════════════════════════════════════════╗"
-          - "║              🔒 Certificate Installation (macOS)                       ║"
+          - "║              📊 Grafana Access Instructions                            ║"
           - "╚════════════════════════════════════════════════════════════════════════╝"
           - ""
-          - "To trust the self-signed certificate, run:"
-          - "  cd {{ playbook_dir }}"
-          - "  ./install-cert.sh"
+          - "🌐 URL: http://grafana.{{ base_ip }}.{{ management_ip_num }}.nip.io"
+          - "👤 Username: admin"
+          - "🔑 Password: {{ grafana_password.stdout }}"
           - ""
-          - "Or manually import: {{ playbook_dir }}/rancher-ca.crt"
+          - "╔════════════════════════════════════════════════════════════════════════╗"
+          - "║              🔷 ArgoCD Access Instructions                             ║"
+          - "╚════════════════════════════════════════════════════════════════════════╝"
           - ""
+          - "🌐 URL: http://argocd.{{ base_ip }}.{{ management_ip_num }}.nip.io"
+          - "👤 Username: admin"
+          - "🔑 Password: {{ argocd_password.stdout | default('See .shared/argocd_password') }}"
+          - ""
+          - "╔════════════════════════════════════════════════════════════════════════╗"
+          - "║              🔷 Kargo Access Instructions                              ║"
+          - "╚════════════════════════════════════════════════════════════════════════╝"
+          - ""
+          - "🌐 URL: https://kargo.{{ base_ip }}.{{ management_ip_num }}.nip.io"
+          - "👤 Username: admin"
+          - "🔑 Password: {{ kargo_admin_password }}"
+          - ""
+

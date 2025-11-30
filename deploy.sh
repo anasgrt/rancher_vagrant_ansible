@@ -75,8 +75,7 @@ echo ""
 echo -e "${YELLOW}This will deploy:${NC}"
 echo "  • Rancher management cluster (local-ctrl)"
 echo "  • Downstream RKE2 clusters (key-ctrl, key-worker)"
-echo "  • ArgoCD (if enabled)"
-echo "  • Fleet GitOps (if enabled)"
+echo "  • Fleet GitOps with ArgoCD & Kargo (if enabled)"
 echo ""
 read -p "Proceed with deployment? (y/N) " -n 1 -r
 echo
@@ -106,16 +105,6 @@ if ansible-playbook -i inventory/hosts.yml site.yml; then
     echo ""
     echo "📋 Important: Import CA certificate from $SHARED_DIR/rancher-ca.crt"
     echo ""
-
-    if [ -f "$SHARED_DIR/argocd_password" ]; then
-        ARGOCD_PASS=$(cat "$SHARED_DIR/argocd_password")
-        echo "🚀 ArgoCD:"
-        echo "   Port-forward: kubectl port-forward -n argocd svc/argocd-server 8080:443"
-        echo "   URL: https://localhost:8080"
-        echo "   Username: admin"
-        echo "   Password: $ARGOCD_PASS"
-        echo ""
-    fi
 
     echo "📁 Shared files location: $SHARED_DIR"
     echo ""
