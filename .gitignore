@@ -25,6 +25,7 @@ __pycache__/
 # OS files
 .DS_Store
 Thumbs.db
+Library/
 
 # IDE files
 .idea/
@@ -33,6 +34,7 @@ Thumbs.db
 
 # Vagrant files (if accidentally placed here)
 .vagrant/
+.vagrant.d/
 
 # Test files
 test_*.yml
