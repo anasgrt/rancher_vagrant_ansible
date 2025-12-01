@@ -33,6 +33,8 @@ Thumbs.db
 
 # Vagrant files (if accidentally placed here)
 .vagrant/
+.vagrant.d/
+Library/
 
 # Test files
 test_*.yml

@@ -37,7 +37,7 @@ Vagrant.configure("2") do |config|
 
     node.vm.provider "virtualbox" do |vb|
       vb.name = "rancher-key-ctrl"
-      vb.memory = "3072"
+      vb.memory = "4096"
       vb.cpus = 2
     end
   end
