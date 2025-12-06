@@ -1,0 +1,38 @@
+---
+- name: Rollback from Backup
+  hosts: all
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - patch-versions.yml
+
+  tasks:
+    - name: Find latest etcd backup
+      ansible.builtin.find:
+        paths: "{{ backup_dir }}"
+        patterns: "etcd-{{ inventory_hostname }}-*.db"
+      register: etcd_backups
+      when: "'management' in group_names or 'key_control' in group_names"
+
+    - name: Restore etcd from backup
+      ansible.builtin.shell: |
+        systemctl stop rke2-server
+        export ETCDCTL_API=3
+        {{ rke2_data_dir }}/bin/etcdctl snapshot restore {{ (etcd_backups.files | sort(attribute='mtime', reverse=true) | first).path }} \
+          --data-dir={{ rke2_data_dir }}/server/db/etcd
+        systemctl start rke2-server
+      when:
+        - "'management' in group_names or 'key_control' in group_names"
+        - etcd_backups.files | length > 0
+
+    - name: Rollback Rancher via Helm
+      ansible.builtin.shell: |
+        export KUBECONFIG={{ rke2_kubeconfig }}
+        helm rollback rancher -n cattle-system
+      environment:
+        KUBECONFIG: "{{ rke2_kubeconfig }}"
+      when: "'management' in group_names"
+
+    - name: Display rollback status
+      ansible.builtin.debug:
+        msg: "✅ Rollback completed for {{ inventory_hostname }}"

@@ -21,12 +21,30 @@ Vagrant.configure("2") do |config|
 
     node.vm.provider "virtualbox" do |vb|
       vb.name = "rancher-local-ctrl"
-      vb.memory = "8192"
+      vb.memory = "12288"
       vb.cpus = 4
+
+      # Resize disk to 60GB
+      unless File.exist?("./Library/VirtualBox/rancher-local-ctrl-disk001.vmdk")
+        vb.customize ['createhd', '--filename', "./Library/VirtualBox/rancher-local-ctrl-disk001.vmdk", '--size', 60 * 1024]
+      end
+      vb.customize ['storageattach', :id, '--storagectl', 'VirtIO Controller', '--port', 1, '--device', 0, '--type', 'hdd', '--medium', "./Library/VirtualBox/rancher-local-ctrl-disk001.vmdk"]
     end
 
     node.vm.provision "shell", inline: <<-SHELL
       echo "192.168.56.10 rancher.local.test" >> /etc/hosts
+      # Extend LVM to use all available disk space (including new disk)
+      if [ -b /dev/sdb ]; then
+        parted /dev/sdb --script mklabel gpt
+        parted /dev/sdb --script mkpart primary 0% 100%
+        pvcreate /dev/sdb1
+        vgextend ubuntu-vg /dev/sdb1
+      fi
+      if [ $(vgs --noheadings -o vg_free --units g ubuntu-vg | tr -d ' Gg' | cut -d. -f1) -gt 5 ]; then
+        lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
+        resize2fs /dev/ubuntu-vg/ubuntu-lv
+        echo "Disk extended to $(df -h / | awk 'NR==2 {print $2}')"
+      fi
     SHELL
   end
 
@@ -39,7 +57,27 @@ Vagrant.configure("2") do |config|
       vb.name = "rancher-key-ctrl"
       vb.memory = "4096"
       vb.cpus = 2
+
+      # Resize disk to 60GB
+      unless File.exist?("./Library/VirtualBox/rancher-key-ctrl-disk001.vmdk")
+        vb.customize ['createhd', '--filename', "./Library/VirtualBox/rancher-key-ctrl-disk001.vmdk", '--size', 60 * 1024]
+      end
+      vb.customize ['storageattach', :id, '--storagectl', 'VirtIO Controller', '--port', 1, '--device', 0, '--type', 'hdd', '--medium', "./Library/VirtualBox/rancher-key-ctrl-disk001.vmdk"]
     end
+
+    node.vm.provision "shell", inline: <<-SHELL
+      # Extend LVM with new disk
+      if [ -b /dev/sdb ]; then
+        parted /dev/sdb --script mklabel gpt
+        parted /dev/sdb --script mkpart primary 0% 100%
+        pvcreate /dev/sdb1
+        vgextend ubuntu-vg /dev/sdb1
+      fi
+      if [ $(vgs --noheadings -o vg_free --units g ubuntu-vg 2>/dev/null | tr -d ' Gg' | cut -d. -f1) -gt 5 ]; then
+        lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
+        resize2fs /dev/ubuntu-vg/ubuntu-lv
+      fi
+    SHELL
   end
 
   config.vm.define "key-worker" do |node|
@@ -50,7 +88,27 @@ Vagrant.configure("2") do |config|
       vb.name = "rancher-key-worker"
       vb.memory = "2048"
       vb.cpus = 2
+
+      # Resize disk to 60GB
+      unless File.exist?("./Library/VirtualBox/rancher-key-worker-disk001.vmdk")
+        vb.customize ['createhd', '--filename', "./Library/VirtualBox/rancher-key-worker-disk001.vmdk", '--size', 60 * 1024]
+      end
+      vb.customize ['storageattach', :id, '--storagectl', 'VirtIO Controller', '--port', 1, '--device', 0, '--type', 'hdd', '--medium', "./Library/VirtualBox/rancher-key-worker-disk001.vmdk"]
     end
+
+    node.vm.provision "shell", inline: <<-SHELL
+      # Extend LVM with new disk
+      if [ -b /dev/sdb ]; then
+        parted /dev/sdb --script mklabel gpt
+        parted /dev/sdb --script mkpart primary 0% 100%
+        pvcreate /dev/sdb1
+        vgextend ubuntu-vg /dev/sdb1
+      fi
+      if [ $(vgs --noheadings -o vg_free --units g ubuntu-vg 2>/dev/null | tr -d ' Gg' | cut -d. -f1) -gt 5 ]; then
+        lvextend -l +100%FREE /dev/ubuntu-vg/ubuntu-lv
+        resize2fs /dev/ubuntu-vg/ubuntu-lv
+      fi
+    SHELL
 
     # Run Ansible provisioning after all VMs are created
     node.vm.provision "ansible" do |ansible|

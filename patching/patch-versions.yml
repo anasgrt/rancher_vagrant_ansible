@@ -1,0 +1,14 @@
+---
+# Set the versions you want to upgrade to
+# Current: RKE2 v1.30.7, Rancher v2.12.3
+# Target: RKE2 v1.31.7, Rancher v2.13.0 (major upgrade - requires K8s 1.31+)
+
+rke2_version: "v1.31.7+rke2r1"        # Major: 1.30.7 → 1.31.7 (required for Rancher 2.13)
+rancher_version: "2.13.0"             # Major: 2.12.3 → 2.13.0
+cert_manager_version: "v1.16.2"       # Current stable
+
+# Upgrade cert-manager?
+upgrade_cert_manager: false           # Not needed, already on stable version
+
+# Backup location
+backup_dir: "/var/backups/rancher"

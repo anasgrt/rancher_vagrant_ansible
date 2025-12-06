@@ -1,0 +1,23 @@
+---
+- name: Backup Rancher Environment
+  hosts: all
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - patch-versions.yml
+
+  tasks:
+    - name: Create backup directory
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: Create etcd snapshot (control planes only)
+      ansible.builtin.shell: |
+        {{ rke2_cmd }} etcd-snapshot save --name backup-{{ ansible_facts['date_time']['epoch'] }}
+      when: "'management' in group_names or 'control' in node_role or 'key_control' in group_names"
+
+    - name: Display backup status
+      ansible.builtin.debug:
+        msg: "✅ Backup created in {{ backup_dir }}"

@@ -17,6 +17,7 @@
     timeout: 300
   delegate_to: localhost
   become: false
+  vars:
 
 - name: Read node token
   ansible.builtin.slurp:
@@ -24,6 +25,7 @@
   register: node_token_content
   delegate_to: localhost
   become: false
+  vars:
 
 - name: Set node token fact
   ansible.builtin.set_fact:
@@ -70,6 +72,7 @@
     timeout: 300
   delegate_to: localhost
   become: false
+  vars:
 
 - name: Create .kube directory for vagrant user
   ansible.builtin.file:

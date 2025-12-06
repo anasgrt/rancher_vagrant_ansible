@@ -88,7 +88,7 @@
     name: rke2_post_install
 
 - name: Wait for Kubernetes API to be ready
-  ansible.builtin.command: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get nodes"
+  ansible.builtin.command: "/var/lib/rancher/rke2/bin/kubectl --kubeconfig={{ rke2_kubeconfig }} get nodes"
   register: kubectl_result
   until: kubectl_result.rc == 0
   retries: 60
@@ -97,7 +97,7 @@
 
 - name: Wait for node to be ready
   ansible.builtin.command: >
-    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }}
+    /var/lib/rancher/rke2/bin/kubectl --kubeconfig={{ rke2_kubeconfig }}
     wait --for=condition=Ready node/{{ node_name }} --timeout=300s
   changed_when: false
   failed_when: false
@@ -201,6 +201,7 @@
     mode: '0644'
   delegate_to: localhost
   become: false
+  vars:
 
 - name: Create ArgoCD manager ServiceAccount
   kubernetes.core.k8s:

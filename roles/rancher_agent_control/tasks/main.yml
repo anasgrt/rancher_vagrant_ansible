@@ -5,6 +5,7 @@
     timeout: 600
   delegate_to: localhost
   become: false
+  vars:
 
 - name: Read import manifest information
   ansible.builtin.slurp:
@@ -12,6 +13,7 @@
   register: import_info_content
   delegate_to: localhost
   become: false
+  vars:
 
 - name: Parse import information
   ansible.builtin.set_fact:
@@ -29,7 +31,7 @@
 
 - name: Apply Rancher import manifest
   ansible.builtin.shell: |
-    {{ import_data.import_command | replace('curl -sfL', 'curl -ksfL') | replace('kubectl', rke2_bin_path + '/kubectl --kubeconfig=' + rke2_kubeconfig) }}
+    {{ import_data.import_command | replace('curl -sfL', 'curl -ksfL') | replace('kubectl', rke2_data_dir + '/bin/kubectl --kubeconfig=' + rke2_kubeconfig) }}
   retries: "{{ timeout_manifest_wait_attempts }}"
   delay: 5
   register: manifest_apply
@@ -62,6 +64,7 @@
   register: rancher_cacerts_api
   delegate_to: localhost
   become: false
+  vars:
   when: rancher_ca_signed_cert | bool
 
 - name: Extract CA certificate content
@@ -76,11 +79,13 @@
 - name: Write CA certificate to temp file for checksum calculation
   ansible.builtin.copy:
     content: "{{ rancher_ca_content }}\n"
-    dest: /tmp/rancher_ca_for_checksum.pem
+    dest: "/tmp/rancher_ca_for_checksum.pem"
     mode: '0644'
   delegate_to: localhost
   become: false
+  vars:
   when: rancher_ca_signed_cert | bool
+  changed_when: true
 
 - name: Calculate CA checksum (matching Rancher's CAChecksum function)
   ansible.builtin.shell: cat /tmp/rancher_ca_for_checksum.pem | shasum -a 256 | cut -d' ' -f1
@@ -89,6 +94,7 @@
   register: ca_checksum_result
   delegate_to: localhost
   become: false
+  vars:
   when: rancher_ca_signed_cert | bool
   changed_when: false
 
@@ -98,6 +104,7 @@
     state: absent
   delegate_to: localhost
   become: false
+  vars:
   when: rancher_ca_signed_cert | bool
 
 - name: Set CA checksum fact

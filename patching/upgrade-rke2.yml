@@ -1,0 +1,65 @@
+---
+- name: Upgrade RKE2
+  hosts: all
+  become: true
+  serial: 1
+  vars_files:
+    - ../group_vars/all.yml
+    - patch-versions.yml
+
+  tasks:
+    - name: Check current RKE2 version
+      ansible.builtin.shell: /usr/local/bin/rke2 --version | head -1 | awk '{print $3}'
+      register: current_rke2
+      changed_when: false
+      failed_when: false
+
+    - name: Skip if already on target version
+      ansible.builtin.debug:
+        msg: "RKE2 already at {{ rke2_version }}, skipping upgrade"
+      when: current_rke2.stdout == rke2_version
+
+    - name: Upgrade RKE2
+      ansible.builtin.shell: |
+        curl -sfL {{ rke2_install_url }} | \
+        INSTALL_RKE2_TYPE='{{ "server" if ("management" in group_names or "key_control" in group_names) else "agent" }}' \
+        INSTALL_RKE2_VERSION='{{ rke2_version }}' sh -
+      args:
+        executable: /bin/bash
+      when: current_rke2.stdout != rke2_version
+      register: rke2_upgrade
+
+    - name: Restart RKE2 service
+      ansible.builtin.systemd:
+        name: "{{ 'rke2-server' if ('management' in group_names or 'key_control' in group_names) else 'rke2-agent' }}"
+        state: restarted
+        enabled: true
+        daemon_reload: true
+      when: rke2_upgrade is changed
+      async: 600
+      poll: 0
+      register: rke2_restart
+
+    - name: Wait for RKE2 service to stabilize
+      ansible.builtin.async_status:
+        jid: "{{ rke2_restart.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 60
+      delay: 10
+      when: rke2_upgrade is changed
+
+    - name: Wait for node to be ready
+      ansible.builtin.command: >
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }}
+        wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=300s
+      when: "'management' in group_names or 'key_control' in group_names"
+      changed_when: false
+
+    - name: Display upgrade status
+      ansible.builtin.debug:
+        msg: "✅ {{ inventory_hostname }} upgraded to {{ rke2_version }}"
+
+    - name: Wait before next node
+      ansible.builtin.pause:
+        seconds: 30

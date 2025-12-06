@@ -45,7 +45,7 @@
     name: rke2_post_install
 
 - name: Wait for Kubernetes API
-  ansible.builtin.command: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} get nodes"
+  ansible.builtin.command: "/var/lib/rancher/rke2/bin/kubectl --kubeconfig={{ rke2_kubeconfig }} get nodes"
   register: kubectl_result
   until: kubectl_result.rc == 0
   retries: 60
@@ -54,7 +54,7 @@
 
 - name: Wait for node to be ready
   ansible.builtin.command: >
-    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }}
+    /var/lib/rancher/rke2/bin/kubectl --kubeconfig={{ rke2_kubeconfig }}
     wait --for=condition=Ready node/{{ node_name }} --timeout=300s
   changed_when: false
   failed_when: false
@@ -110,6 +110,7 @@
   loop:
     - { name: jetstack, url: "{{ jetstack_repo }}" }
     - { name: rancher-latest, url: "{{ rancher_latest_repo }}" }
+    - { name: rancher-stable, url: "https://releases.rancher.com/server-charts/stable" }
     - { name: sealed-secrets, url: "{{ sealed_secrets_repo }}" }
   environment:
     KUBECONFIG: "{{ rke2_kubeconfig }}"
@@ -150,6 +151,7 @@
     mode: '0644'
   delegate_to: localhost
   become: false
+  vars:
 
 - name: Create ArgoCD manager ServiceAccount
   kubernetes.core.k8s:

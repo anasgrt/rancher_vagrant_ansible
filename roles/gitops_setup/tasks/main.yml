@@ -16,13 +16,15 @@
     timeout: 300
   delegate_to: localhost
   become: false
+  vars:
 
 - name: Read Rancher token
-  slurp:
+  ansible.builtin.slurp:
     src: "{{ shared_dir }}/rancher_token"
   register: rancher_token_content
   delegate_to: localhost
   become: false
+  vars:
 
 - name: Set Rancher token fact
   set_fact:
@@ -240,13 +242,13 @@
 # =============================================================================
 
 - name: Read Git SSH private key for ArgoCD and Kargo
-  slurp:
+  ansible.builtin.slurp:
     src: "{{ git_ssh_private_key_path }}"
   register: git_ssh_key_content
   delegate_to: localhost
   become: false
+  vars:
   when: git_ssh_private_key_path is defined
-  ignore_errors: true
 
 - name: Create ArgoCD Git repository secret
   shell: |
@@ -306,16 +308,18 @@
   ignore_errors: true
 
 - name: Save ArgoCD password to shared directory
-  copy:
+  ansible.builtin.copy:
     content: "{{ argocd_password.stdout }}"
     dest: "{{ shared_dir }}/argocd_password"
     mode: '0600'
   delegate_to: localhost
   become: false
+  vars:
   when:
     - argocd_enabled | bool
     - argocd_password is defined
     - argocd_password.rc == 0
+  changed_when: true
 
 # =============================================================================
 # Display completion information

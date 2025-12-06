@@ -1,23 +1,16 @@
 ---
-- name: Deploy Rancher Multi-Cluster Environment
-  hosts: all
-  gather_facts: true
-  become: true
-
-  tasks:
-    - name: Create shared directory for inter-host communication
-      file:
-        path: "{{ shared_dir }}"
-        state: directory
-        mode: '0755'
-      become: false
-      delegate_to: localhost
-      run_once: true
-
 - name: Deploy Rancher Management Server (local-ctrl)
   hosts: management
   gather_facts: true
   become: true
+
+  tasks:
+    - name: Create shared directory
+      ansible.builtin.file:
+        path: "{{ playbook_dir }}/.shared"
+        state: directory
+        mode: '0755'
+      run_once: true
 
   roles:
     - role: system_setup

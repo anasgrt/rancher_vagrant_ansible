@@ -3,7 +3,7 @@
 # SECTION 1: WAIT FOR RKE2 TO BE READY
 # ============================================================================
 - name: Wait for RKE2 ingress controller (if enabled)
-  ansible.builtin.command: "{{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} -n kube-system get ds rke2-ingress-nginx-controller"
+  ansible.builtin.command: "{{ rke2_data_dir }}/bin/kubectl --kubeconfig={{ rke2_kubeconfig }} -n kube-system get ds rke2-ingress-nginx-controller"
   register: ingress_check
   until: ingress_check.rc == 0
   retries: 60
@@ -188,24 +188,42 @@
 - name: Install Rancher via Helm
   kubernetes.core.helm:
     name: rancher
-    chart_ref: rancher-latest/rancher
+    chart_ref: rancher-stable/rancher
     release_namespace: cattle-system
     create_namespace: true
+    chart_version: "{{ rancher_release }}"
     values:
       hostname: "{{ rancher_hostname }}"
       replicas: 1
       bootstrapPassword: "{{ rancher_bootstrap_password }}"
+      resources:
+        limits:
+          memory: 2Gi
+        requests:
+          memory: 1Gi
       ingress:
         tls:
           source: "{{ 'secret' if rancher_ca_signed_cert else 'rancher' }}"
       privateCA: "{{ rancher_ca_signed_cert | bool }}"
     kubeconfig: "{{ rke2_kubeconfig }}"
-  environment:
-    KUBECONFIG: "{{ rke2_kubeconfig }}"
-  retries: 3
-  delay: 10
-  register: rancher_install
-  until: rancher_install is succeeded
+
+- name: Patch Rancher deployment strategy to Recreate
+  ansible.builtin.shell: |
+    {{ rke2_data_dir }}/bin/kubectl --kubeconfig={{ rke2_kubeconfig }} patch deployment rancher \
+      -n cattle-system --type='json' \
+      -p='[{"op": "replace", "path": "/spec/strategy", "value": {"type": "Recreate"}}]'
+  register: patch_strategy
+  changed_when: "'patched' in patch_strategy.stdout"
+  failed_when: patch_strategy.rc != 0 and 'not patched' not in patch_strategy.stderr
+
+- name: Patch Rancher deployment startup probe for resource-constrained environments
+  ansible.builtin.shell: |
+    {{ rke2_data_dir }}/bin/kubectl --kubeconfig={{ rke2_kubeconfig }} patch deployment rancher \
+      -n cattle-system --type='json' \
+      -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/startupProbe/failureThreshold", "value": 30}]'
+  register: patch_probe
+  changed_when: "'patched' in patch_probe.stdout"
+  failed_when: patch_probe.rc != 0 and 'not patched' not in patch_probe.stderr
 
 - name: Wait for Rancher to be ready
   ansible.builtin.uri:
@@ -270,6 +288,7 @@
   register: existing_local_ca
   delegate_to: localhost
   become: false
+  vars:
   when: rancher_ca_signed_cert | bool
 
 - name: Calculate checksum of new CA certificate
@@ -287,9 +306,9 @@
     content: "{{ rancher_cacerts.json.value }}"
     dest: "{{ shared_dir }}/rancher-ca.crt"
     mode: '0644'
-    force: true
   delegate_to: localhost
   become: false
+  vars:
   when: rancher_ca_signed_cert | bool and rancher_cacerts.json.value | default('') | length > 0
 
 - name: Copy CA certificate to playbook directory
@@ -297,9 +316,9 @@
     content: "{{ rancher_cacerts.json.value }}"
     dest: "{{ playbook_dir }}/rancher-ca.crt"
     mode: '0644'
-    force: true
   delegate_to: localhost
   become: false
+  vars:
   when: rancher_ca_signed_cert | bool and rancher_cacerts.json.value | default('') | length > 0
   register: ca_cert_copied
 
@@ -310,6 +329,7 @@
     sudo -n security help >/dev/null 2>&1 && echo "yes" || echo "no"
   delegate_to: localhost
   become: false
+  vars:
   register: sudo_available
   changed_when: false
   when:
@@ -324,6 +344,7 @@
     done
   delegate_to: localhost
   become: false
+  vars:
   when:
     - rancher_ca_signed_cert | bool
     - ca_cert_changed | default(false)
@@ -336,6 +357,7 @@
     sudo -n security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "{{ playbook_dir }}/rancher-ca.crt"
   delegate_to: localhost
   become: false
+  vars:
   when:
     - rancher_ca_signed_cert | bool
     - ca_cert_changed | default(false)
@@ -380,7 +402,7 @@
 # ============================================================================
 - name: Get Rancher bootstrap password from secret
   ansible.builtin.command: >
-    {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }}
+    {{ rke2_data_dir }}/bin/kubectl --kubeconfig={{ rke2_kubeconfig }}
     get secret --namespace cattle-system bootstrap-secret
     -o jsonpath='{.data.bootstrapPassword}'
   register: bootstrap_password_b64
@@ -410,6 +432,7 @@
     mode: '0600'
   delegate_to: localhost
   become: false
+  vars:
 
 - name: Configure Rancher server-url setting
   ansible.builtin.uri:
@@ -495,7 +518,8 @@
       registration_token: {{ item.json.data[0].token }}
     dest: "{{ shared_dir }}/cluster_{{ item.item.item.name }}_import.yml"
     mode: '0644'
-  loop: "{{ registration_tokens.results }}"
   delegate_to: localhost
   become: false
+  vars:
+  loop: "{{ registration_tokens.results }}"
   when: item.json.data is defined and item.json.data | length > 0

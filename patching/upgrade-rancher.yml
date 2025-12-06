@@ -1,0 +1,176 @@
+---
+- name: Upgrade Rancher
+  hosts: management
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - patch-versions.yml
+
+  tasks:
+    - name: Get current Rancher version
+      kubernetes.core.helm_info:
+        name: rancher
+        release_namespace: cattle-system
+        kubeconfig: "{{ rke2_kubeconfig }}"
+      register: rancher_info
+      environment:
+        KUBECONFIG: "{{ rke2_kubeconfig }}"
+
+    - name: Debug Rancher info
+      ansible.builtin.debug:
+        var: rancher_info
+
+    - name: Check if upgrade needed
+      ansible.builtin.set_fact:
+        skip_rancher: false
+
+    - name: Upgrade cert-manager CRDs
+      kubernetes.core.k8s:
+        state: present
+        src: "https://github.com/cert-manager/cert-manager/releases/download/{{ cert_manager_version }}/cert-manager.crds.yaml"
+        kubeconfig: "{{ rke2_kubeconfig }}"
+      when: upgrade_cert_manager | bool
+
+    - name: Upgrade cert-manager
+      kubernetes.core.helm:
+        name: cert-manager
+        chart_ref: jetstack/cert-manager
+        release_namespace: cert-manager
+        chart_version: "{{ cert_manager_version }}"
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        wait: true
+      environment:
+        KUBECONFIG: "{{ rke2_kubeconfig }}"
+      when: upgrade_cert_manager | bool
+
+    - name: Delete rancher-webhook pod
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        delete pod -n cattle-system -l app=rancher-webhook --ignore-not-found=true
+      changed_when: false
+      when: not (skip_rancher | default(false) | bool)
+
+    - name: Wait for webhook to be ready
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        wait --for=condition=Ready pod -l app=rancher-webhook -n cattle-system --timeout=180s
+      changed_when: false
+      register: webhook_ready
+      retries: 3
+      delay: 10
+      until: webhook_ready.rc == 0
+      when: not (skip_rancher | default(false) | bool)
+
+    - name: Verify webhook endpoints available
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        get endpoints -n cattle-system rancher-webhook -o jsonpath='{.subsets[*].addresses[*].ip}'
+      register: webhook_endpoints
+      until: webhook_endpoints.stdout | length > 0
+      retries: 20
+      delay: 3
+      changed_when: false
+      when: not (skip_rancher | default(false) | bool)
+
+    - name: Upgrade Rancher
+      kubernetes.core.helm:
+        name: rancher
+        chart_ref: rancher-stable/rancher
+        release_namespace: cattle-system
+        chart_version: "{{ rancher_version }}"
+        update_repo_cache: true
+        force: true
+        values:
+          hostname: "{{ rancher_hostname }}"
+          bootstrapPassword: "{{ rancher_bootstrap_password }}"
+          replicas: 1
+          resources:
+            limits:
+              memory: 2Gi
+            requests:
+              memory: 1Gi
+          ingress:
+            tls:
+              source: "{{ 'secret' if rancher_ca_signed_cert else 'rancher' }}"
+          privateCA: "{{ rancher_ca_signed_cert | bool }}"
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        wait: false
+        timeout: "15m"
+
+    - name: Patch Rancher deployment strategy to Recreate
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} patch deployment rancher \
+          -n cattle-system --type='json' \
+          -p='[{"op": "replace", "path": "/spec/strategy", "value": {"type": "Recreate"}}]'
+      register: patch_strategy
+      changed_when: "'patched' in patch_strategy.stdout"
+      failed_when: patch_strategy.rc != 0 and 'not patched' not in patch_strategy.stderr
+      when: not (skip_rancher | default(false) | bool)
+
+    - name: Patch Rancher deployment startup probe for resource-constrained environments
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} patch deployment rancher \
+          -n cattle-system --type='json' \
+          -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/startupProbe/failureThreshold", "value": 30}]'
+      register: patch_probe
+      changed_when: "'patched' in patch_probe.stdout"
+      failed_when: patch_probe.rc != 0 and 'not patched' not in patch_probe.stderr
+      when: not (skip_rancher | default(false) | bool)
+
+    - name: Delete webhook pod post-upgrade to sync with new Rancher
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        delete pod -n cattle-system -l app=rancher-webhook --ignore-not-found=true
+      changed_when: false
+
+    - name: Wait for webhook ready post-upgrade
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        wait --for=condition=Ready pod -l app=rancher-webhook -n cattle-system --timeout=180s
+      changed_when: false
+      retries: 3
+      delay: 10
+      register: webhook_post
+      until: webhook_post.rc == 0
+
+    - name: Check if rancher pod is stuck
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        get pods -n cattle-system -l app=rancher -o jsonpath='{.items[0].status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || echo ""
+      register: rancher_state
+      changed_when: false
+
+    - name: Restart rancher pod if stuck
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        delete pod -n cattle-system -l app=rancher --ignore-not-found=true
+      when: rancher_state.stdout in ['CrashLoopBackOff', 'Error', 'ImagePullBackOff']
+      changed_when: true
+
+    - name: Wait for Rancher pods to be ready
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        wait --for=condition=Ready pod -l app=rancher -n cattle-system --timeout=300s
+      changed_when: false
+      retries: 3
+      delay: 30
+      register: pod_wait
+      until: pod_wait.rc == 0
+
+    - name: Wait for Rancher API
+      ansible.builtin.uri:
+        url: "{{ rancher_url }}/ping"
+        validate_certs: false
+        status_code: 200
+      register: rancher_ping
+      until: rancher_ping.status == 200
+      retries: 60
+      delay: 10
+
+    - name: Display upgrade status
+      ansible.builtin.debug:
+        msg:
+          - "✅ Rancher upgraded to {{ rancher_version }}"
+          - "{{ '✅ cert-manager upgraded to ' + cert_manager_version if upgrade_cert_manager else '⏭️  cert-manager not upgraded' }}"
+          - ""
+          - "Rancher URL: {{ rancher_url }}"

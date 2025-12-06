@@ -42,13 +42,3 @@
       shell: |
         ps aux | grep -E 'rke2|kubelet|containerd' | grep -v grep | awk '{print $2}' | xargs -r kill -9
       ignore_errors: true
-
-- name: Cleanup Local Artifacts
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  tasks:
-    - name: Remove shared directory
-      file:
-        path: /tmp/rancher_shared
-        state: absent
