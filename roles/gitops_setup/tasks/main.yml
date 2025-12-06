@@ -16,7 +16,6 @@
     timeout: 300
   delegate_to: localhost
   become: false
-  vars:
 
 - name: Read Rancher token
   ansible.builtin.slurp:
@@ -24,7 +23,6 @@
   register: rancher_token_content
   delegate_to: localhost
   become: false
-  vars:
 
 - name: Set Rancher token fact
   set_fact:
@@ -247,7 +245,6 @@
   register: git_ssh_key_content
   delegate_to: localhost
   become: false
-  vars:
   when: git_ssh_private_key_path is defined
 
 - name: Create ArgoCD Git repository secret
@@ -314,7 +311,6 @@
     mode: '0600'
   delegate_to: localhost
   become: false
-  vars:
   when:
     - argocd_enabled | bool
     - argocd_password is defined

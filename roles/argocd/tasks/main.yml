@@ -23,7 +23,6 @@
     mode: '0600'
   delegate_to: localhost
   become: false
-  vars:
   when: argocd_password.rc == 0
   changed_when: true
 
