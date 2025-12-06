@@ -4,7 +4,7 @@
   gather_facts: true
   become: true
 
-  tasks:
+  pre_tasks:
     - name: Create shared directory
       ansible.builtin.file:
         path: "{{ playbook_dir }}/.shared"

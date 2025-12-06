@@ -288,7 +288,6 @@
   register: existing_local_ca
   delegate_to: localhost
   become: false
-  vars:
   when: rancher_ca_signed_cert | bool
 
 - name: Calculate checksum of new CA certificate
@@ -308,7 +307,6 @@
     mode: '0644'
   delegate_to: localhost
   become: false
-  vars:
   when: rancher_ca_signed_cert | bool and rancher_cacerts.json.value | default('') | length > 0
 
 - name: Copy CA certificate to playbook directory
@@ -318,7 +316,6 @@
     mode: '0644'
   delegate_to: localhost
   become: false
-  vars:
   when: rancher_ca_signed_cert | bool and rancher_cacerts.json.value | default('') | length > 0
   register: ca_cert_copied
 
@@ -329,7 +326,6 @@
     sudo -n security help >/dev/null 2>&1 && echo "yes" || echo "no"
   delegate_to: localhost
   become: false
-  vars:
   register: sudo_available
   changed_when: false
   when:
@@ -344,7 +340,6 @@
     done
   delegate_to: localhost
   become: false
-  vars:
   when:
     - rancher_ca_signed_cert | bool
     - ca_cert_changed | default(false)
@@ -357,7 +352,6 @@
     sudo -n security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "{{ playbook_dir }}/rancher-ca.crt"
   delegate_to: localhost
   become: false
-  vars:
   when:
     - rancher_ca_signed_cert | bool
     - ca_cert_changed | default(false)
@@ -432,7 +426,6 @@
     mode: '0600'
   delegate_to: localhost
   become: false
-  vars:
 
 - name: Configure Rancher server-url setting
   ansible.builtin.uri:
@@ -520,6 +513,5 @@
     mode: '0644'
   delegate_to: localhost
   become: false
-  vars:
   loop: "{{ registration_tokens.results }}"
   when: item.json.data is defined and item.json.data | length > 0

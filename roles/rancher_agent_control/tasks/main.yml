@@ -5,7 +5,6 @@
     timeout: 600
   delegate_to: localhost
   become: false
-  vars:
 
 - name: Read import manifest information
   ansible.builtin.slurp:
@@ -13,7 +12,6 @@
   register: import_info_content
   delegate_to: localhost
   become: false
-  vars:
 
 - name: Parse import information
   ansible.builtin.set_fact:
@@ -64,7 +62,6 @@
   register: rancher_cacerts_api
   delegate_to: localhost
   become: false
-  vars:
   when: rancher_ca_signed_cert | bool
 
 - name: Extract CA certificate content
@@ -83,7 +80,6 @@
     mode: '0644'
   delegate_to: localhost
   become: false
-  vars:
   when: rancher_ca_signed_cert | bool
   changed_when: true
 
@@ -94,7 +90,6 @@
   register: ca_checksum_result
   delegate_to: localhost
   become: false
-  vars:
   when: rancher_ca_signed_cert | bool
   changed_when: false
 
@@ -104,7 +99,6 @@
     state: absent
   delegate_to: localhost
   become: false
-  vars:
   when: rancher_ca_signed_cert | bool
 
 - name: Set CA checksum fact

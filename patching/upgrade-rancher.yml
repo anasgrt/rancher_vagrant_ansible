@@ -72,6 +72,13 @@
       changed_when: false
       when: not (skip_rancher | default(false) | bool)
 
+    - name: Delete nginx ingress admission webhook to prevent upgrade failures
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        delete validatingwebhookconfiguration rke2-ingress-nginx-admission --ignore-not-found=true
+      changed_when: false
+      when: not (skip_rancher | default(false) | bool)
+
     - name: Upgrade Rancher
       kubernetes.core.helm:
         name: rancher
