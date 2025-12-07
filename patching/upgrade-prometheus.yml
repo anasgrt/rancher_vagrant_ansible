@@ -1,0 +1,92 @@
+---
+- name: Upgrade Prometheus on management cluster
+  hosts: management
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - patch-versions.yml
+
+  tasks:
+    - name: Get current Prometheus version
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        get helmchart prometheus -n kube-system -o jsonpath='{.spec.version}' 2>/dev/null || echo "not-installed"
+      register: current_prometheus
+      changed_when: false
+
+    - name: Skip if not installed
+      ansible.builtin.debug:
+        msg: "Prometheus not installed, skipping upgrade"
+      when: current_prometheus.stdout == "not-installed"
+
+    - name: Skip if already on target version
+      ansible.builtin.debug:
+        msg: "Prometheus already at {{ prometheus_version }}, skipping upgrade"
+      when: current_prometheus.stdout == prometheus_version
+
+    - name: Upgrade Prometheus HelmChart
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        patch helmchart prometheus -n kube-system --type='merge' \
+        -p '{"spec":{"version":"{{ prometheus_version }}"}}'
+      when: current_prometheus.stdout != prometheus_version and current_prometheus.stdout != "not-installed"
+      register: prometheus_upgraded
+
+    - name: Wait for Prometheus pods to be ready
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        wait --for=condition=Ready pod -l app.kubernetes.io/name=prometheus -n prometheus-monitoring --timeout=300s
+      when: prometheus_upgraded is changed
+      changed_when: false
+      failed_when: false
+
+    - name: Display upgrade status
+      ansible.builtin.debug:
+        msg: "✅ Prometheus (management) upgraded: {{ current_prometheus.stdout }} → {{ prometheus_version }}"
+      when: prometheus_upgraded is changed
+
+- name: Upgrade Prometheus on downstream clusters
+  hosts: key_control
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+    - patch-versions.yml
+
+  tasks:
+    - name: Get current Prometheus version
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        get helmchart prometheus -n kube-system -o jsonpath='{.spec.version}' 2>/dev/null || echo "not-installed"
+      register: current_prometheus
+      changed_when: false
+
+    - name: Skip if not installed
+      ansible.builtin.debug:
+        msg: "Prometheus not installed, skipping upgrade"
+      when: current_prometheus.stdout == "not-installed"
+
+    - name: Skip if already on target version
+      ansible.builtin.debug:
+        msg: "Prometheus already at {{ prometheus_version }}, skipping upgrade"
+      when: current_prometheus.stdout == prometheus_version
+
+    - name: Upgrade Prometheus HelmChart
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        patch helmchart prometheus -n kube-system --type='merge' \
+        -p '{"spec":{"version":"{{ prometheus_version }}"}}'
+      when: current_prometheus.stdout != prometheus_version and current_prometheus.stdout != "not-installed"
+      register: prometheus_upgraded
+
+    - name: Wait for Prometheus pods to be ready
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        wait --for=condition=Ready pod -l app.kubernetes.io/name=prometheus -n prometheus-monitoring --timeout=300s
+      when: prometheus_upgraded is changed
+      changed_when: false
+      failed_when: false
+
+    - name: Display upgrade status
+      ansible.builtin.debug:
+        msg: "✅ Prometheus (downstream) upgraded: {{ current_prometheus.stdout }} → {{ prometheus_version }}"
+      when: prometheus_upgraded is changed
