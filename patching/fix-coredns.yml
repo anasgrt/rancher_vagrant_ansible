@@ -1,0 +1,78 @@
+---
+# Standalone playbook to fix CoreDNS on downstream clusters
+# Usage: ansible-playbook -i inventory/hosts.yml patching/fix-coredns.yml
+- name: Fix CoreDNS with Rancher hostname on downstream clusters
+  hosts: key_control
+  become: true
+  vars_files:
+    - ../group_vars/all.yml
+
+  tasks:
+    - name: Apply CoreDNS config with Rancher hostname
+      kubernetes.core.k8s:
+        state: present
+        kind: ConfigMap
+        name: rke2-coredns-rke2-coredns
+        namespace: kube-system
+        definition:
+          data:
+            Corefile: |
+              .:53 {
+                  errors
+                  health {
+                      lameduck 10s
+                  }
+                  ready
+                  hosts {
+                      {{ base_ip }}.{{ management_ip_num }} {{ rancher_hostname }}
+                      fallthrough
+                  }
+                  kubernetes cluster.local cluster.local in-addr.arpa ip6.arpa {
+                      pods insecure
+                      fallthrough in-addr.arpa ip6.arpa
+                      ttl 30
+                  }
+                  prometheus 0.0.0.0:9153
+                  forward . 8.8.8.8 1.1.1.1
+                  cache 30
+                  loop
+                  reload
+                  loadbalance
+              }
+        kubeconfig: "{{ rke2_kubeconfig }}"
+      register: coredns_updated
+
+    - name: Restart CoreDNS pods
+      kubernetes.core.k8s:
+        state: absent
+        kind: Pod
+        namespace: kube-system
+        label_selectors:
+          - k8s-app=kube-dns
+        kubeconfig: "{{ rke2_kubeconfig }}"
+      when: coredns_updated is changed
+
+    - name: Wait for CoreDNS to be ready
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        name: rke2-coredns-rke2-coredns
+        namespace: kube-system
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 120
+
+    - name: Test DNS resolution
+      ansible.builtin.shell: |
+        {{ rke2_bin_path }}/kubectl --kubeconfig={{ rke2_kubeconfig }} \
+        run -it --rm dns-test --image=busybox --restart=Never -- \
+        nslookup {{ rancher_hostname }}
+      register: dns_test
+      changed_when: false
+      failed_when: false
+
+    - name: Display DNS test result
+      ansible.builtin.debug:
+        msg: "{{ dns_test.stdout_lines }}"

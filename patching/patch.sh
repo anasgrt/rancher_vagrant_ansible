@@ -21,6 +21,7 @@ KARGO_VERSION=$(get_version "kargo_version")
 ARGOCD_VERSION=$(get_version "argocd_version")
 PROMETHEUS_VERSION=$(get_version "prometheus_version")
 NGINX_INGRESS_VERSION=$(get_version "nginx_ingress_version")
+SEALED_SECRETS_VERSION=$(get_version "sealed_secrets_version")
 
 echo "╔════════════════════════════════════════════════════════════════╗"
 echo "║         Rancher and RKE2 Upgrade Script                        ║"
@@ -38,6 +39,7 @@ echo "  Kargo:          $KARGO_VERSION"
 echo "  ArgoCD:         $ARGOCD_VERSION"
 echo "  Prometheus:     $PROMETHEUS_VERSION"
 echo "  nginx-ingress:  $NGINX_INGRESS_VERSION"
+echo "  Sealed Secrets: $SEALED_SECRETS_VERSION"
 echo ""
 
 read -p "Continue with upgrade? (y/n): " -n 1 -r
@@ -48,11 +50,11 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
 fi
 
 echo ""
-echo "Step 1/8: Creating backups..."
+echo "Step 1/9: Creating backups..."
 ansible-playbook -i $INVENTORY $PATCHING_DIR/backup.yml
 
 echo ""
-echo "Step 2/8: Upgrading RKE2 on management cluster..."
+echo "Step 2/9: Upgrading RKE2 on management cluster..."
 RKE2_MGMT_UPDATED=""
 RKE2_MGMT_OUTPUT=$(ansible-playbook -i $INVENTORY $PATCHING_DIR/upgrade-rke2.yml --limit management 2>&1)
 echo "$RKE2_MGMT_OUTPUT"
@@ -61,7 +63,7 @@ if echo "$RKE2_MGMT_OUTPUT" | grep -q "upgraded to"; then
 fi
 
 echo ""
-echo "Step 3/8: Upgrading Rancher..."
+echo "Step 3/9: Upgrading Rancher..."
 RANCHER_UPDATED=""
 RANCHER_OUTPUT=$(ansible-playbook -i $INVENTORY $PATCHING_DIR/upgrade-rancher.yml 2>&1)
 echo "$RANCHER_OUTPUT"
@@ -70,7 +72,7 @@ if echo "$RANCHER_OUTPUT" | grep -q "upgraded to"; then
 fi
 
 echo ""
-echo "Step 4/8: Upgrading RKE2 on downstream clusters..."
+echo "Step 4/9: Upgrading RKE2 on downstream clusters..."
 RKE2_DOWN_UPDATED=""
 RKE2_DOWN_OUTPUT=$(ansible-playbook -i $INVENTORY $PATCHING_DIR/upgrade-rke2.yml --limit downstream_clusters 2>&1)
 echo "$RKE2_DOWN_OUTPUT"
@@ -81,7 +83,7 @@ RKE2_UPDATED="${RKE2_MGMT_UPDATED}${RKE2_DOWN_UPDATED}"
 [[ -n "$RKE2_UPDATED" ]] && RKE2_UPDATED="✓ updated"
 
 echo ""
-echo "Step 5/8: Upgrading Kargo..."
+echo "Step 5/9: Upgrading Kargo..."
 KARGO_UPDATED=""
 KARGO_OUTPUT=$(ansible-playbook -i $INVENTORY $PATCHING_DIR/upgrade-kargo.yml 2>&1)
 echo "$KARGO_OUTPUT"
@@ -90,7 +92,7 @@ if echo "$KARGO_OUTPUT" | grep -q "upgraded:"; then
 fi
 
 echo ""
-echo "Step 6/8: Upgrading ArgoCD..."
+echo "Step 6/9: Upgrading ArgoCD..."
 ARGOCD_UPDATED=""
 ARGOCD_OUTPUT=$(ansible-playbook -i $INVENTORY $PATCHING_DIR/upgrade-argocd.yml 2>&1)
 echo "$ARGOCD_OUTPUT"
@@ -99,7 +101,7 @@ if echo "$ARGOCD_OUTPUT" | grep -q "upgraded"; then
 fi
 
 echo ""
-echo "Step 7/8: Upgrading Prometheus..."
+echo "Step 7/9: Upgrading Prometheus..."
 PROMETHEUS_UPDATED=""
 PROMETHEUS_OUTPUT=$(ansible-playbook -i $INVENTORY $PATCHING_DIR/upgrade-prometheus.yml 2>&1)
 echo "$PROMETHEUS_OUTPUT"
@@ -108,12 +110,21 @@ if echo "$PROMETHEUS_OUTPUT" | grep -q "upgraded:"; then
 fi
 
 echo ""
-echo "Step 8/8: Upgrading nginx-ingress..."
+echo "Step 8/9: Upgrading nginx-ingress..."
 NGINX_UPDATED=""
 NGINX_OUTPUT=$(ansible-playbook -i $INVENTORY $PATCHING_DIR/upgrade-nginx-ingress.yml 2>&1)
 echo "$NGINX_OUTPUT"
 if echo "$NGINX_OUTPUT" | grep -q "upgraded:"; then
     NGINX_UPDATED="✓ updated"
+fi
+
+echo ""
+echo "Step 9/9: Upgrading Sealed Secrets..."
+SEALED_SECRETS_UPDATED=""
+SEALED_SECRETS_OUTPUT=$(ansible-playbook -i $INVENTORY $PATCHING_DIR/upgrade-sealed-secrets.yml 2>&1)
+echo "$SEALED_SECRETS_OUTPUT"
+if echo "$SEALED_SECRETS_OUTPUT" | grep -q "upgraded to"; then
+    SEALED_SECRETS_UPDATED="✓ updated"
 fi
 
 echo ""
@@ -130,6 +141,7 @@ printf "  %-18s %-22s %s\n" "Kargo" "$KARGO_VERSION" "$KARGO_UPDATED"
 printf "  %-18s %-22s %s\n" "ArgoCD" "$ARGOCD_VERSION" "$ARGOCD_UPDATED"
 printf "  %-18s %-22s %s\n" "Prometheus" "$PROMETHEUS_VERSION" "$PROMETHEUS_UPDATED"
 printf "  %-18s %-22s %s\n" "nginx-ingress" "$NGINX_INGRESS_VERSION" "$NGINX_UPDATED"
+printf "  %-18s %-22s %s\n" "Sealed Secrets" "$SEALED_SECRETS_VERSION" "$SEALED_SECRETS_UPDATED"
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""

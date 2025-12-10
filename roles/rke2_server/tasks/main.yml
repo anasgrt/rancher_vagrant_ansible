@@ -119,6 +119,7 @@
   kubernetes.core.helm:
     name: sealed-secrets
     chart_ref: sealed-secrets/sealed-secrets
+    chart_version: "{{ sealed_secrets_version }}"
     release_namespace: kube-system
     values:
       fullnameOverride: sealed-secrets-controller
