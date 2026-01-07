@@ -12,3 +12,9 @@ upgrade_cert_manager: false           # Not needed, already on stable version
 
 # Backup location
 backup_dir: "/var/backups/rancher"
+
+# Fleet-managed component versions (deployed via HelmChart resources)
+kargo_version: "1.8.4"                # Upgrade: 1.8.2 → 1.8.4
+argocd_version: "7.7.5"               # Upgrade: 7.7.0 → 7.7.5
+prometheus_version: "65.8.1"          # Upgrade: 65.5.0 → 65.8.1
+nginx_ingress_version: "4.11.3"       # Upgrade: 4.11.0 → 4.11.3
