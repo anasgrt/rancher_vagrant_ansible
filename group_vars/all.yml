@@ -20,7 +20,7 @@ rke2_channel: "stable"
 rke2_install_url: "https://get.rke2.io"
 cni: "calico"
 
-sealed_secrets_version: "latest"
+sealed_secrets_version: "2.17.1"
 
 jetstack_repo: "https://charts.jetstack.io"
 rancher_latest_repo: "https://releases.rancher.com/server-charts/latest"

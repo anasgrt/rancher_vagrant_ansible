@@ -48,3 +48,9 @@ test_*.yml
 .kiro/steering/byterover-rules.md
 .qoder/rules/byterover-rules.md
 .augment/rules/byterover-rules.md
+
+# Agent instruction files
+AGENTS.md
+CLAUDE.md
+CLAUDE.pdf
+.github/copilot-instructions.md

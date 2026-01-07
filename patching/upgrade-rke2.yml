@@ -131,6 +131,72 @@
       changed_when: false
       when: upgrade_required
 
+    - name: Re-apply CoreDNS config with Rancher hostname (downstream only)
+      kubernetes.core.k8s:
+        state: present
+        kind: ConfigMap
+        name: rke2-coredns-rke2-coredns
+        namespace: kube-system
+        definition:
+          data:
+            Corefile: |
+              .:53 {
+                  errors
+                  health {
+                      lameduck 10s
+                  }
+                  ready
+                  hosts {
+                      {{ base_ip }}.{{ management_ip_num }} {{ rancher_hostname }}
+                      fallthrough
+                  }
+                  kubernetes cluster.local cluster.local in-addr.arpa ip6.arpa {
+                      pods insecure
+                      fallthrough in-addr.arpa ip6.arpa
+                      ttl 30
+                  }
+                  prometheus 0.0.0.0:9153
+                  forward . 8.8.8.8 1.1.1.1
+                  cache 30
+                  loop
+                  reload
+                  loadbalance
+              }
+        kubeconfig: "{{ rke2_kubeconfig }}"
+      when:
+        - rke2_upgrade is changed
+        - "'key_control' in group_names"
+      failed_when: false
+
+    - name: Restart CoreDNS pods after upgrade (downstream only)
+      kubernetes.core.k8s:
+        state: absent
+        kind: Pod
+        namespace: kube-system
+        label_selectors:
+          - k8s-app=kube-dns
+        kubeconfig: "{{ rke2_kubeconfig }}"
+      when:
+        - rke2_upgrade is changed
+        - "'key_control' in group_names"
+      failed_when: false
+
+    - name: Wait for CoreDNS to be ready after upgrade
+      kubernetes.core.k8s_info:
+        kind: Deployment
+        name: rke2-coredns-rke2-coredns
+        namespace: kube-system
+        kubeconfig: "{{ rke2_kubeconfig }}"
+        wait: true
+        wait_condition:
+          type: Available
+          status: "True"
+        wait_timeout: 120
+      when:
+        - rke2_upgrade is changed
+        - "'key_control' in group_names"
+      failed_when: false
+
     - name: Display upgrade status
       ansible.builtin.debug:
         msg: "✅ {{ inventory_hostname }} upgraded to {{ rke2_version }} and uncordoned"
